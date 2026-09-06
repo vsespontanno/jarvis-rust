@@ -43,5 +43,12 @@ argument:
 cargo run --release -- /path/to/ggml-model.bin
 ```
 
+Native Whisper diagnostics are hidden unless they are warnings or errors. Enable detailed logs when
+debugging with:
+
+```bash
+RUST_LOG=debug cargo run --release
+```
+
 The first launch may require enabling microphone access for Terminal in **System Settings → Privacy
 & Security → Microphone**.

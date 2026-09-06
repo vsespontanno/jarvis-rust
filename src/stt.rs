@@ -15,6 +15,11 @@ impl WhisperTranscriber {
             "model file does not exist: {}",
             model_path.display()
         );
+
+        // Route whisper.cpp's direct stderr output through Rust's `log` facade. The application
+        // logger then hides info/debug diagnostics by default while preserving warnings/errors.
+        whisper_rs::install_logging_hooks();
+
         let context =
             WhisperContext::new_with_params(model_path, WhisperContextParameters::default())?;
         ensure!(
