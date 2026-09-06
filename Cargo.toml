@@ -8,3 +8,4 @@ anyhow = "1.0.104"
 cpal = "0.18.2"
 hound = "3.5.1"
 rubato = "5.0.0"
+whisper-rs = { version = "0.16.0", features = ["metal"] }
