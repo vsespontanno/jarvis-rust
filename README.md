@@ -1,8 +1,8 @@
 # Jarvis
 
-A local voice assistant built incrementally in Rust. The current version records five seconds from
-the default microphone, converts the audio to mono 16 kHz PCM, and transcribes Russian speech with
-Whisper.
+A local voice assistant built incrementally in Rust. The current version calibrates the background
+noise, automatically records one spoken utterance, converts the audio to mono 16 kHz PCM, and
+transcribes Russian speech with Whisper.
 
 ## Prerequisites
 
@@ -52,3 +52,135 @@ RUST_LOG=debug cargo run --release
 
 The first launch may require enabling microphone access for Terminal in **System Settings → Privacy
 & Security → Microphone**.
+
+## Math used in the current pipeline
+
+### PCM conversion and normalization
+
+The microphone can provide samples in several PCM formats. Floating-point samples are clamped to
+the full-scale interval and converted to signed 16-bit PCM for storage:
+
+$$
+s_{i16} = \operatorname{round}\left(\operatorname{clamp}(x,-1,1)\,(2^{15}-1)\right).
+$$
+
+Unsigned 16-bit PCM is recentered around zero:
+
+$$
+s_{i16} = s_{u16} - 2^{15}.
+$$
+
+Before signal processing, integer PCM is normalized back to floating point:
+
+$$
+x = \frac{s_{i16}}{2^{15}}.
+$$
+
+This gives approximately $x \in [-1,1)$, independent of the integer representation used by the
+audio device.
+
+### Downmix to mono
+
+For a frame with $C$ channels, the mono sample is the arithmetic mean of its channel samples:
+
+$$
+x_{mono}[n] = \frac{1}{C}\sum_{c=1}^{C}x_c[n].
+$$
+
+Whisper expects one channel, and averaging avoids multiplying the amplitude when several channels
+contain the same signal.
+
+### Analysis window size
+
+The level meter analyzes windows of duration $T=20\text{ ms}$. At sample rate $f_s$, a window
+contains
+
+$$
+N = \operatorname{round}(f_s T)
+$$
+
+audio frames. For example, this is 480 frames at 24 kHz and 960 frames at 48 kHz. Using time-based
+windows keeps the detector behavior consistent across different microphones.
+
+### RMS signal level
+
+For every analysis window, the root mean square amplitude is
+
+$$
+x_{RMS} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1}x[n]^2}.
+$$
+
+RMS measures signal energy more usefully than an instantaneous peak: alternating positive and
+negative waveform samples do not cancel because they are squared first.
+
+### dBFS
+
+The RMS value is converted to decibels relative to digital full scale:
+
+$$
+L_{dBFS} = 20\log_{10}\left(\max(x_{RMS}, \varepsilon)\right),
+\qquad \varepsilon=10^{-12}.
+$$
+
+An RMS amplitude of 1 corresponds to 0 dBFS, 0.5 is approximately -6.02 dBFS, and quieter signals
+have increasingly negative values. The small $\varepsilon$ prevents $\log(0)$ for digital silence.
+
+The terminal bar maps the displayed range $[L_{min},0]$, currently $L_{min}=-60$ dBFS, to
+$[0,1]$:
+
+$$
+p = \operatorname{clamp}\left(\frac{L_{dBFS}-L_{min}}{0-L_{min}},0,1\right).
+$$
+
+### Resampling to 16 kHz
+
+For input rate $f_{in}$ and Whisper's required output rate $f_{out}=16000$, the resampling ratio is
+
+$$
+r = \frac{f_{out}}{f_{in}},
+\qquad
+N_{out} \approx \left\lceil N_{in}r \right\rceil.
+$$
+
+For the 24 kHz AirPods example, $r=2/3$: 116640 input frames become 77760 output frames.
+
+By the Nyquist theorem, a signal sampled at $f_s$ can represent frequencies only below
+
+$$
+f_{Nyquist}=\frac{f_s}{2}.
+$$
+
+After conversion to 16 kHz, the new Nyquist frequency is 8 kHz. Frequencies above it must be removed
+before downsampling or they fold into the speech band as aliasing. The project delegates this
+anti-alias filtering and fixed-ratio FFT resampling to `rubato`.
+
+### Adaptive voice activity detection
+
+During the first second, the detector collects 50 level windows and uses their median as the initial
+noise floor:
+
+$$
+L_{noise}=\operatorname{median}(L_1,L_2,\ldots,L_{50}).
+$$
+
+The median is less sensitive than the mean to a few unusually loud calibration windows. While the
+detector is waiting for speech, quiet observations slowly update the estimate with an exponential
+moving average:
+
+$$
+L_{noise,t}=(1-\alpha)L_{noise,t-1}+\alpha L_t,
+\qquad \alpha=0.02.
+$$
+
+Speech start and stop use different thresholds:
+
+$$
+L_{start}=L_{noise}+12\text{ dB},
+\qquad
+L_{end}=L_{noise}+6\text{ dB}.
+$$
+
+This difference is hysteresis: once speech has started, the signal may become quieter without
+immediately switching back to silence. Speech starts after three consecutive loud windows (60 ms)
+and ends after 30 consecutive quiet windows (600 ms). A 300 ms pre-roll is retained before the
+detected start so that threshold confirmation does not cut off the first phoneme.
