@@ -61,7 +61,7 @@ The microphone can provide samples in several PCM formats. Floating-point sample
 the full-scale interval and converted to signed 16-bit PCM for storage:
 
 $$
-s_{i16} = \operatorname{round}\left(\operatorname{clamp}(x,-1,1)\,(2^{15}-1)\right).
+s_{i16} = \left\lfloor \max(-1,\min(1,x))\,(2^{15}-1) \right\rceil.
 $$
 
 Unsigned 16-bit PCM is recentered around zero:
@@ -96,7 +96,7 @@ The level meter analyzes windows of duration $T=20\text{ ms}$. At sample rate $f
 contains
 
 $$
-N = \operatorname{round}(f_s T)
+N = \left\lfloor f_s T \right\rceil
 $$
 
 audio frames. For example, this is 480 frames at 24 kHz and 960 frames at 48 kHz. Using time-based
@@ -129,7 +129,7 @@ The terminal bar maps the displayed range $[L_{min},0]$, currently $L_{min}=-60$
 $[0,1]$:
 
 $$
-p = \operatorname{clamp}\left(\frac{L_{dBFS}-L_{min}}{0-L_{min}},0,1\right).
+p = \max\left(0,\min\left(1,\frac{L_{dBFS}-L_{min}}{0-L_{min}}\right)\right).
 $$
 
 ### Resampling to 16 kHz
@@ -160,7 +160,7 @@ During the first second, the detector collects 50 level windows and uses their m
 noise floor:
 
 $$
-L_{noise}=\operatorname{median}(L_1,L_2,\ldots,L_{50}).
+L_{noise}=\mathrm{median}(L_1,L_2,\ldots,L_{50}).
 $$
 
 The median is less sensitive than the mean to a few unusually loud calibration windows. While the
