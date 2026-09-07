@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use anyhow::{Result, ensure};
 use rubato::{Fft, FixedSync, Resampler, audioadapter_buffers::direct::InterleavedSlice};
 
@@ -11,25 +9,6 @@ const RESAMPLER_CHUNK_SIZE: usize = 1_024;
 /// Audio satisfying Whisper's input contract: mono f32 PCM at 16 kHz.
 pub struct SttAudio {
     pub samples: Vec<f32>,
-}
-
-impl SttAudio {
-    pub fn write_wav(&self, path: &Path) -> Result<()> {
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: STT_SAMPLE_RATE,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::create(path, spec)?;
-
-        for &sample in &self.samples {
-            writer.write_sample(sample)?;
-        }
-
-        writer.finalize()?;
-        Ok(())
-    }
 }
 
 pub fn prepare_for_stt(recording: &Recording) -> Result<SttAudio> {

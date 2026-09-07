@@ -1,4 +1,5 @@
 use std::{
+    ops::Range,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -17,12 +18,15 @@ pub struct Recording {
     pub samples: Vec<i16>,
     pub sample_rate: u32,
     pub channels: u16,
+    pub device_name: String,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct AudioLevel {
     pub rms: f32,
     pub dbfs: f32,
+    /// Exclusive native-rate frame index covered by this measurement.
+    pub end_frame: usize,
 }
 
 pub struct RecordingSession {
@@ -31,6 +35,7 @@ pub struct RecordingSession {
     levels: Receiver<AudioLevel>,
     sample_rate: u32,
     channels: u16,
+    device_name: String,
 }
 
 impl Recording {
@@ -50,6 +55,28 @@ impl Recording {
         writer.finalize()?;
         Ok(())
     }
+
+    pub fn frame_count(&self) -> usize {
+        self.samples.len() / self.channels as usize
+    }
+
+    pub fn slice_frames(&self, range: Range<usize>) -> Result<Self> {
+        ensure!(range.start <= range.end, "invalid audio frame range");
+        ensure!(
+            range.end <= self.frame_count(),
+            "audio frame range exceeds the recording"
+        );
+
+        let channels = self.channels as usize;
+        let sample_range = range.start * channels..range.end * channels;
+
+        Ok(Self {
+            samples: self.samples[sample_range].to_vec(),
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            device_name: self.device_name.clone(),
+        })
+    }
 }
 
 impl RecordingSession {
@@ -64,9 +91,11 @@ impl RecordingSession {
 
         let sample_format = supported_config.sample_format();
         let config: StreamConfig = supported_config.into();
-        let capacity = config.sample_rate as usize
-            * config.channels as usize
-            * expected_duration.as_secs() as usize;
+        let expected_frames =
+            (config.sample_rate as f64 * expected_duration.as_secs_f64()).ceil() as usize;
+        let capacity = expected_frames
+            .checked_mul(config.channels as usize)
+            .context("recording buffer capacity overflowed")?;
         let samples = Arc::new(Mutex::new(Vec::with_capacity(capacity)));
         let level_window_frames =
             (config.sample_rate as f64 * level_window.as_secs_f64()).round() as usize;
@@ -74,7 +103,8 @@ impl RecordingSession {
             level_window_frames > 0,
             "audio level window must contain at least one frame"
         );
-        let (level_sender, levels) = sync_channel(32);
+        let level_channel_capacity = expected_frames.div_ceil(level_window_frames) + 1;
+        let (level_sender, levels) = sync_channel(level_channel_capacity);
 
         let device_name = device
             .description()
@@ -102,6 +132,7 @@ impl RecordingSession {
             levels,
             sample_rate: config.sample_rate,
             channels: config.channels,
+            device_name,
         })
     }
 
@@ -110,6 +141,10 @@ impl RecordingSession {
         timeout: Duration,
     ) -> std::result::Result<AudioLevel, RecvTimeoutError> {
         self.levels.recv_timeout(timeout)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     pub fn finish(self) -> Result<Recording> {
@@ -124,6 +159,7 @@ impl RecordingSession {
             samples,
             sample_rate: self.sample_rate,
             channels: self.channels,
+            device_name: self.device_name,
         })
     }
 }
@@ -133,6 +169,7 @@ struct LevelAccumulator {
     sum_squares: f64,
     samples: usize,
     window_samples: usize,
+    total_samples: usize,
 }
 
 impl LevelAccumulator {
@@ -141,12 +178,14 @@ impl LevelAccumulator {
             sum_squares: 0.0,
             samples: 0,
             window_samples,
+            total_samples: 0,
         }
     }
 
     fn push(&mut self, sample: f32) -> Option<AudioLevel> {
         self.sum_squares += f64::from(sample) * f64::from(sample);
         self.samples += 1;
+        self.total_samples += 1;
 
         if self.samples < self.window_samples {
             return None;
@@ -157,7 +196,11 @@ impl LevelAccumulator {
         self.sum_squares = 0.0;
         self.samples = 0;
 
-        Some(AudioLevel { rms, dbfs })
+        Some(AudioLevel {
+            rms,
+            dbfs,
+            end_frame: self.total_samples,
+        })
     }
 }
 

@@ -15,6 +15,7 @@ target
 
 # Local microphone recordings
 /recording*.wav
+/data/
 
 # Local speech recognition models
 /models/*.bin
