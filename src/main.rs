@@ -91,6 +91,8 @@ fn record_utterance() -> Result<audio::Recording> {
         max_speech_windows: windows(MAX_SPEECH_DURATION),
         start_margin_db: 12.0,
         end_margin_db: 6.0,
+        minimum_start_level_dbfs: -35.0,
+        minimum_end_level_dbfs: -40.0,
         noise_ema_alpha: 0.02,
     });
     let mut speech_start_frame = None;

@@ -1,5 +1,8 @@
 use crate::audio::AudioLevel;
 
+const DIGITAL_SILENCE_CUTOFF_DBFS: f32 = -120.0;
+const FALLBACK_NOISE_FLOOR_DBFS: f32 = -90.0;
+
 #[derive(Clone, Copy, Debug)]
 pub struct VadConfig {
     pub calibration_windows: usize,
@@ -9,6 +12,8 @@ pub struct VadConfig {
     pub max_speech_windows: usize,
     pub start_margin_db: f32,
     pub end_margin_db: f32,
+    pub minimum_start_level_dbfs: f32,
+    pub minimum_end_level_dbfs: f32,
     pub noise_ema_alpha: f32,
 }
 
@@ -65,6 +70,7 @@ impl VadDetector {
         assert!(config.max_speech_windows > 0);
         assert!((0.0..=1.0).contains(&config.noise_ema_alpha));
         assert!(config.start_margin_db > config.end_margin_db);
+        assert!(config.minimum_start_level_dbfs > config.minimum_end_level_dbfs);
 
         Self {
             config,
@@ -83,7 +89,7 @@ impl VadDetector {
                     return None;
                 }
 
-                let noise_floor_dbfs = median(levels);
+                let noise_floor_dbfs = estimate_noise_floor(levels);
                 self.noise_floor_dbfs = Some(noise_floor_dbfs);
                 self.state = State::Waiting {
                     loud_windows: 0,
@@ -99,16 +105,19 @@ impl VadDetector {
                 let noise_floor = self
                     .noise_floor_dbfs
                     .expect("noise floor is set after calibration");
-                let start_threshold = noise_floor + self.config.start_margin_db;
+                let start_threshold = (noise_floor + self.config.start_margin_db)
+                    .max(self.config.minimum_start_level_dbfs);
 
                 if level.dbfs >= start_threshold {
                     *loud_windows += 1;
                 } else {
                     *loud_windows = 0;
-                    self.noise_floor_dbfs = Some(
-                        (1.0 - self.config.noise_ema_alpha) * noise_floor
-                            + self.config.noise_ema_alpha * level.dbfs,
-                    );
+                    if level.dbfs > DIGITAL_SILENCE_CUTOFF_DBFS {
+                        self.noise_floor_dbfs = Some(
+                            (1.0 - self.config.noise_ema_alpha) * noise_floor
+                                + self.config.noise_ema_alpha * level.dbfs,
+                        );
+                    }
                 }
 
                 if *loud_windows >= self.config.speech_start_windows {
@@ -133,10 +142,11 @@ impl VadDetector {
                 elapsed,
             } => {
                 *elapsed += 1;
-                let end_threshold = self
+                let end_threshold = (self
                     .noise_floor_dbfs
                     .expect("noise floor is set after calibration")
-                    + self.config.end_margin_db;
+                    + self.config.end_margin_db)
+                    .max(self.config.minimum_end_level_dbfs);
 
                 if level.dbfs < end_threshold {
                     *quiet_windows += 1;
@@ -176,6 +186,16 @@ fn median(values: &mut [f32]) -> f32 {
     }
 }
 
+fn estimate_noise_floor(levels: &mut Vec<f32>) -> f32 {
+    levels.retain(|level| *level > DIGITAL_SILENCE_CUTOFF_DBFS);
+
+    if levels.is_empty() {
+        FALLBACK_NOISE_FLOOR_DBFS
+    } else {
+        median(levels)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +209,8 @@ mod tests {
             max_speech_windows: 5,
             start_margin_db: 12.0,
             end_margin_db: 6.0,
+            minimum_start_level_dbfs: -100.0,
+            minimum_end_level_dbfs: -110.0,
             noise_ema_alpha: 0.0,
         }
     }
@@ -267,6 +289,48 @@ mod tests {
             Some(VadEvent::SpeechEnded {
                 at_frame: 10,
                 reason: SpeechEndReason::MaximumDuration,
+            })
+        );
+    }
+
+    #[test]
+    fn ignores_digitally_gated_silence_during_calibration() {
+        let mut detector = VadDetector::new(config());
+
+        detector.observe(level(-240.0, 1));
+        detector.observe(level(-240.0, 2));
+
+        assert_eq!(
+            detector.observe(level(-50.0, 3)),
+            Some(VadEvent::Calibrated {
+                noise_floor_dbfs: -50.0,
+            })
+        );
+    }
+
+    #[test]
+    fn absolute_threshold_rejects_low_level_background_speech() {
+        let mut config = config();
+        config.minimum_start_level_dbfs = -35.0;
+        config.minimum_end_level_dbfs = -40.0;
+        let mut detector = VadDetector::new(config);
+        detector.observe(level(-51.0, 1));
+        detector.observe(level(-50.0, 2));
+        detector.observe(level(-49.0, 3));
+
+        assert!(detector.observe(level(-40.0, 4)).is_none());
+        assert!(detector.observe(level(-40.0, 5)).is_none());
+        assert!(detector.observe(level(-30.0, 6)).is_none());
+        assert_eq!(
+            detector.observe(level(-30.0, 7)),
+            Some(VadEvent::SpeechStarted { at_frame: 7 })
+        );
+        assert!(detector.observe(level(-42.0, 8)).is_none());
+        assert_eq!(
+            detector.observe(level(-42.0, 9)),
+            Some(VadEvent::SpeechEnded {
+                at_frame: 9,
+                reason: SpeechEndReason::Silence,
             })
         );
     }

@@ -156,28 +156,31 @@ anti-alias filtering and fixed-ratio FFT resampling to `rubato`.
 
 ### Adaptive voice activity detection
 
-During the first second, the detector collects 50 level windows and uses their median as the initial
-noise floor:
+During the first second, the detector collects 50 level windows, discards digitally gated silence
+below -120 dBFS, and uses the median of the remaining values as the initial noise floor:
 
 $$
 L_{noise}=\mathrm{median}(L_1,L_2,\ldots,L_{50}).
 $$
 
-The median is less sensitive than the mean to a few unusually loud calibration windows. While the
-detector is waiting for speech, quiet observations slowly update the estimate with an exponential
-moving average:
+This filtering matters for devices such as AirPods, which may output exact zero-filled windows when
+their own noise gate closes. Without it, the estimated floor can incorrectly become -240 dBFS. The
+median is less sensitive than the mean to a few unusually loud calibration windows. While the
+detector is waiting for speech, non-gated quiet observations slowly update the estimate with an
+exponential moving average:
 
 $$
 L_{noise,t}=(1-\alpha)L_{noise,t-1}+\alpha L_t,
 \qquad \alpha=0.02.
 $$
 
-Speech start and stop use different thresholds:
+Speech start and stop use different adaptive thresholds, together with absolute guards against
+low-level background sounds:
 
 $$
-L_{start}=L_{noise}+12\text{ dB},
+L_{start}=\max(L_{noise}+12\text{ dB},-35\text{ dBFS}),
 \qquad
-L_{end}=L_{noise}+6\text{ dB}.
+L_{end}=\max(L_{noise}+6\text{ dB},-40\text{ dBFS}).
 $$
 
 This difference is hysteresis: once speech has started, the signal may become quieter without
