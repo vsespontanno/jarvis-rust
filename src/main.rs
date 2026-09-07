@@ -1,16 +1,22 @@
 mod actions;
 mod audio;
 mod command;
+mod dataset;
 mod parser;
 mod preprocessing;
 mod stt;
 mod vad;
 
 use std::{
+    collections::BTreeMap,
     env,
     io::{self, Write},
     path::PathBuf,
-    sync::mpsc::RecvTimeoutError,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::RecvTimeoutError,
+    },
     time::Duration,
 };
 
@@ -22,13 +28,19 @@ const MAX_WAIT_FOR_SPEECH: Duration = Duration::from_secs(10);
 const MAX_SPEECH_DURATION: Duration = Duration::from_secs(15);
 const SPEECH_START_DURATION: Duration = Duration::from_millis(60);
 const SPEECH_END_DURATION: Duration = Duration::from_millis(600);
+const MINIMUM_SPEECH_DURATION: Duration = Duration::from_millis(140);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
-const RAW_OUTPUT_PATH: &str = "recording.wav";
-const STT_OUTPUT_PATH: &str = "recording-16khz-mono.wav";
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
+const DATASET_PATH: &str = "data";
+
+struct CapturedUtterance {
+    recording: audio::Recording,
+    vad: dataset::VadTelemetry,
+}
 
 fn main() -> Result<()> {
     init_logging();
+    let running = install_shutdown_handler()?;
 
     let model_path = env::args_os()
         .nth(1)
@@ -38,47 +50,166 @@ fn main() -> Result<()> {
     println!("Loading Whisper model from {}...", model_path.display());
     let transcriber = stt::WhisperTranscriber::load(&model_path)
         .context("failed to load the speech recognition model")?;
+    let dataset = dataset::DatasetStore::open(DATASET_PATH)
+        .context("failed to initialize the local dataset")?;
     println!("Whisper model is ready.");
+    println!("Jarvis is running. Press Ctrl+C to stop.");
 
-    let recording = record_utterance().context("failed to capture a speech utterance")?;
+    while running.load(Ordering::Relaxed) {
+        if let Err(error) = process_command(&transcriber, &dataset, &running)
+            && running.load(Ordering::Relaxed)
+        {
+            eprintln!("\nCould not process this command: {error:#}");
+        }
+    }
 
-    recording
-        .write_wav(RAW_OUTPUT_PATH.as_ref())
-        .context("failed to write the recording")?;
+    println!("\nJarvis stopped.");
+    Ok(())
+}
+
+fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
+    let running = Arc::new(AtomicBool::new(true));
+    let signal_flag = Arc::clone(&running);
+    ctrlc::set_handler(move || signal_flag.store(false, Ordering::Relaxed))
+        .context("failed to install the Ctrl+C handler")?;
+
+    Ok(running)
+}
+
+fn process_command(
+    transcriber: &stt::WhisperTranscriber,
+    dataset: &dataset::DatasetStore,
+    running: &AtomicBool,
+) -> Result<()> {
+    let Some(captured) =
+        record_utterance(running).context("failed to capture a speech utterance")?
+    else {
+        return Ok(());
+    };
+
+    let sample = dataset.new_sample();
+    let mut record = dataset::DatasetRecord::new(&sample, &captured.recording);
+    record.vad = Some(captured.vad);
+
+    if !has_minimum_speech(record.vad.as_ref().expect("VAD telemetry is set")) {
+        let speech_duration_ms = record
+            .vad
+            .as_ref()
+            .and_then(|vad| vad.speech_windows)
+            .unwrap_or(0) as u128
+            * LEVEL_WINDOW.as_millis();
+        println!(
+            "Discarded short audio candidate ({speech_duration_ms} ms of speech; minimum is {} ms).",
+            MINIMUM_SPEECH_DURATION.as_millis(),
+        );
+        record.audio_path = None;
+        record.execution_result = dataset::ExecutionResult {
+            status: dataset::ExecutionStatus::Rejected,
+            response: None,
+            error: None,
+        };
+        dataset
+            .append(&record)
+            .context("failed to append the rejected detection event")?;
+        return Ok(());
+    }
+
+    let result = process_recording(
+        transcriber,
+        dataset,
+        &sample,
+        &captured.recording,
+        &mut record,
+    );
+    if let Err(error) = &result {
+        record.processing_error = Some(format!("{error:#}"));
+    }
+    dataset
+        .append(&record)
+        .context("failed to append the dataset event")?;
+
+    result
+}
+
+fn process_recording(
+    transcriber: &stt::WhisperTranscriber,
+    dataset: &dataset::DatasetStore,
+    sample: &dataset::SampleDescriptor,
+    recording: &audio::Recording,
+    record: &mut dataset::DatasetRecord,
+) -> Result<()> {
+    dataset.save_audio(sample, recording)?;
 
     println!(
-        "Saved {} samples ({} Hz, {} channel(s)) to {RAW_OUTPUT_PATH}",
+        "Saved {} samples ({} Hz, {} channel(s)) to {}",
         recording.samples.len(),
         recording.sample_rate,
         recording.channels,
+        sample.audio_path,
     );
 
-    let stt_audio = preprocessing::prepare_for_stt(&recording)
+    let stt_audio = preprocessing::prepare_for_stt(recording)
         .context("failed to prepare the recording for speech recognition")?;
-    stt_audio
-        .write_wav(STT_OUTPUT_PATH.as_ref())
-        .context("failed to write the preprocessed recording")?;
-
-    println!(
-        "Saved {} mono f32 samples ({} Hz) to {STT_OUTPUT_PATH}",
-        stt_audio.samples.len(),
-        preprocessing::STT_SAMPLE_RATE,
-    );
 
     println!("Transcribing...");
     let transcript = transcriber
         .transcribe(&stt_audio.samples)
         .context("speech recognition failed")?;
+    record.transcript = Some(transcript.clone());
 
     println!("\nTranscript:\n{transcript}");
 
     let command = parser::parse(&transcript);
-    match actions::execute(&command).context("failed to execute the voice command")? {
-        Some(response) => println!("\nJarvis:\n{response}"),
-        None => println!("\nJarvis:\nКоманда пока не поддерживается."),
+    record.prediction = Some(dataset::IntentPrediction {
+        intent: command.intent_name().to_owned(),
+        slots: BTreeMap::new(),
+    });
+
+    if command == command::Command::NoSpeech {
+        println!("\nIgnored Whisper non-speech annotation.");
+        record.execution_result = dataset::ExecutionResult {
+            status: dataset::ExecutionStatus::Rejected,
+            response: None,
+            error: None,
+        };
+        return Ok(());
+    }
+
+    match actions::execute(&command) {
+        Ok(Some(response)) => {
+            println!("\nJarvis:\n{response}");
+            record.execution_result = dataset::ExecutionResult {
+                status: dataset::ExecutionStatus::Succeeded,
+                response: Some(response),
+                error: None,
+            };
+        }
+        Ok(None) => {
+            let response = "Команда пока не поддерживается.".to_owned();
+            println!("\nJarvis:\n{response}");
+            record.execution_result = dataset::ExecutionResult {
+                status: dataset::ExecutionStatus::Unsupported,
+                response: Some(response),
+                error: None,
+            };
+        }
+        Err(error) => {
+            record.execution_result = dataset::ExecutionResult {
+                status: dataset::ExecutionStatus::Failed,
+                response: None,
+                error: Some(format!("{error:#}")),
+            };
+            return Err(error).context("failed to execute the voice command");
+        }
     }
 
     Ok(())
+}
+
+fn has_minimum_speech(telemetry: &dataset::VadTelemetry) -> bool {
+    telemetry
+        .speech_windows
+        .is_some_and(|speech_windows| speech_windows >= windows(MINIMUM_SPEECH_DURATION))
 }
 
 fn init_logging() {
@@ -88,7 +219,7 @@ fn init_logging() {
         .init();
 }
 
-fn record_utterance() -> Result<audio::Recording> {
+fn record_utterance(running: &AtomicBool) -> Result<Option<CapturedUtterance>> {
     let expected_duration = CALIBRATION_DURATION + MAX_WAIT_FOR_SPEECH + MAX_SPEECH_DURATION;
     let session = audio::RecordingSession::start(expected_duration, LEVEL_WINDOW)
         .context("failed to start recording from the default input device")?;
@@ -108,7 +239,11 @@ fn record_utterance() -> Result<audio::Recording> {
 
     println!("Calibrating background noise for 1 second — stay quiet...");
 
-    let speech_end_frame = loop {
+    let (speech_end_frame, vad_metrics) = loop {
+        if !running.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+
         match session.recv_level_timeout(Duration::from_secs(1)) {
             Ok(level) => {
                 print_level(level)?;
@@ -125,10 +260,14 @@ fn record_utterance() -> Result<audio::Recording> {
                     }
                     Some(vad::VadEvent::SpeechEnded { at_frame, reason }) => {
                         println!("\nSpeech ended ({reason:?}).");
-                        break at_frame;
+                        let metrics = detector
+                            .metrics()
+                            .context("VAD finished without producing telemetry")?;
+                        break (at_frame, metrics);
                     }
                     Some(vad::VadEvent::TimedOut) => {
-                        anyhow::bail!("no speech detected within 10 seconds")
+                        println!("\nNo speech detected. Recalibrating...");
+                        return Ok(None);
                     }
                     None => {}
                 }
@@ -141,7 +280,27 @@ fn record_utterance() -> Result<audio::Recording> {
     let speech_start_frame = speech_start_frame.context("speech ended before it started")?;
     let recording = session.finish().context("failed to finish recording")?;
 
-    recording.slice_frames(speech_start_frame..speech_end_frame)
+    let recording = recording.slice_frames(speech_start_frame..speech_end_frame)?;
+    let duration_ms = (recording.frame_count() as f64 * 1_000.0 / f64::from(recording.sample_rate))
+        .round() as u64;
+    let window_ms = LEVEL_WINDOW.as_millis() as u64;
+
+    Ok(Some(CapturedUtterance {
+        recording,
+        vad: dataset::VadTelemetry {
+            noise_floor_dbfs: Some(vad_metrics.noise_floor_dbfs),
+            start_threshold_dbfs: Some(vad_metrics.start_threshold_dbfs),
+            end_threshold_dbfs: Some(vad_metrics.end_threshold_dbfs),
+            peak_dbfs: Some(vad_metrics.peak_dbfs),
+            mean_speech_dbfs: Some(vad_metrics.mean_speech_dbfs),
+            median_speech_dbfs: Some(vad_metrics.median_speech_dbfs),
+            duration_ms: Some(duration_ms),
+            trailing_silence_ms: Some(vad_metrics.trailing_silence_windows as u64 * window_ms),
+            speech_windows: Some(vad_metrics.speech_windows),
+            silence_windows: Some(vad_metrics.silence_windows),
+            end_reason: Some(vad_metrics.end_reason.as_str().to_owned()),
+        },
+    }))
 }
 
 fn windows(duration: Duration) -> usize {
@@ -166,4 +325,22 @@ fn print_level(level: audio::AudioLevel) -> Result<()> {
     );
     io::stdout().flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn telemetry_with_speech_windows(speech_windows: usize) -> dataset::VadTelemetry {
+        dataset::VadTelemetry {
+            speech_windows: Some(speech_windows),
+            ..dataset::VadTelemetry::default()
+        }
+    }
+
+    #[test]
+    fn rejects_candidates_shorter_than_one_hundred_forty_milliseconds() {
+        assert!(!has_minimum_speech(&telemetry_with_speech_windows(6)));
+        assert!(has_minimum_speech(&telemetry_with_speech_windows(7)));
+    }
 }

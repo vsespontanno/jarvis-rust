@@ -23,6 +23,30 @@ pub enum SpeechEndReason {
     MaximumDuration,
 }
 
+impl SpeechEndReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Silence => "silence",
+            Self::MaximumDuration => "maximum_duration",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VadMetrics {
+    pub noise_floor_dbfs: f32,
+    pub start_threshold_dbfs: f32,
+    pub end_threshold_dbfs: f32,
+    pub peak_dbfs: f32,
+    pub mean_speech_dbfs: f32,
+    pub median_speech_dbfs: f32,
+    pub detected_windows: usize,
+    pub trailing_silence_windows: usize,
+    pub speech_windows: usize,
+    pub silence_windows: usize,
+    pub end_reason: SpeechEndReason,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum VadEvent {
     Calibrated {
@@ -44,12 +68,15 @@ enum State {
         levels: Vec<f32>,
     },
     Waiting {
-        loud_windows: usize,
+        loud_levels: Vec<f32>,
         waited: usize,
     },
     Speaking {
         quiet_windows: usize,
         elapsed: usize,
+        speech_levels: Vec<f32>,
+        silence_windows: usize,
+        peak_dbfs: f32,
     },
     Finished,
 }
@@ -59,6 +86,7 @@ pub struct VadDetector {
     config: VadConfig,
     state: State,
     noise_floor_dbfs: Option<f32>,
+    metrics: Option<VadMetrics>,
 }
 
 impl VadDetector {
@@ -78,7 +106,12 @@ impl VadDetector {
                 levels: Vec::with_capacity(config.calibration_windows),
             },
             noise_floor_dbfs: None,
+            metrics: None,
         }
+    }
+
+    pub fn metrics(&self) -> Option<VadMetrics> {
+        self.metrics
     }
 
     pub fn observe(&mut self, level: AudioLevel) -> Option<VadEvent> {
@@ -92,13 +125,13 @@ impl VadDetector {
                 let noise_floor_dbfs = estimate_noise_floor(levels);
                 self.noise_floor_dbfs = Some(noise_floor_dbfs);
                 self.state = State::Waiting {
-                    loud_windows: 0,
+                    loud_levels: Vec::with_capacity(self.config.speech_start_windows),
                     waited: 0,
                 };
                 Some(VadEvent::Calibrated { noise_floor_dbfs })
             }
             State::Waiting {
-                loud_windows,
+                loud_levels,
                 waited,
             } => {
                 *waited += 1;
@@ -109,9 +142,9 @@ impl VadDetector {
                     .max(self.config.minimum_start_level_dbfs);
 
                 if level.dbfs >= start_threshold {
-                    *loud_windows += 1;
+                    loud_levels.push(level.dbfs);
                 } else {
-                    *loud_windows = 0;
+                    loud_levels.clear();
                     if level.dbfs > DIGITAL_SILENCE_CUTOFF_DBFS {
                         self.noise_floor_dbfs = Some(
                             (1.0 - self.config.noise_ema_alpha) * noise_floor
@@ -120,10 +153,19 @@ impl VadDetector {
                     }
                 }
 
-                if *loud_windows >= self.config.speech_start_windows {
+                if loud_levels.len() >= self.config.speech_start_windows {
+                    let speech_levels = std::mem::take(loud_levels);
+                    let peak_dbfs = speech_levels
+                        .iter()
+                        .copied()
+                        .max_by(f32::total_cmp)
+                        .expect("speech start contains at least one level");
                     self.state = State::Speaking {
                         quiet_windows: 0,
                         elapsed: 0,
+                        speech_levels,
+                        silence_windows: 0,
+                        peak_dbfs,
                     };
                     return Some(VadEvent::SpeechStarted {
                         at_frame: level.end_frame,
@@ -140,6 +182,9 @@ impl VadDetector {
             State::Speaking {
                 quiet_windows,
                 elapsed,
+                speech_levels,
+                silence_windows,
+                peak_dbfs,
             } => {
                 *elapsed += 1;
                 let end_threshold = (self
@@ -150,9 +195,12 @@ impl VadDetector {
 
                 if level.dbfs < end_threshold {
                     *quiet_windows += 1;
+                    *silence_windows += 1;
                 } else {
                     *quiet_windows = 0;
+                    speech_levels.push(level.dbfs);
                 }
+                *peak_dbfs = peak_dbfs.max(level.dbfs);
 
                 let reason = if *quiet_windows >= self.config.speech_end_windows {
                     Some(SpeechEndReason::Silence)
@@ -162,13 +210,36 @@ impl VadDetector {
                     None
                 };
 
-                reason.map(|reason| {
+                if let Some(reason) = reason {
+                    let mean_speech_dbfs =
+                        speech_levels.iter().sum::<f32>() / speech_levels.len() as f32;
+                    let median_speech_dbfs = median(speech_levels);
+                    let noise_floor_dbfs = self
+                        .noise_floor_dbfs
+                        .expect("noise floor is set after calibration");
+                    let metrics = VadMetrics {
+                        noise_floor_dbfs,
+                        start_threshold_dbfs: (noise_floor_dbfs + self.config.start_margin_db)
+                            .max(self.config.minimum_start_level_dbfs),
+                        end_threshold_dbfs: end_threshold,
+                        peak_dbfs: *peak_dbfs,
+                        mean_speech_dbfs,
+                        median_speech_dbfs,
+                        detected_windows: speech_levels.len() + *silence_windows,
+                        trailing_silence_windows: *quiet_windows,
+                        speech_windows: speech_levels.len(),
+                        silence_windows: *silence_windows,
+                        end_reason: reason,
+                    };
+                    self.metrics = Some(metrics);
                     self.state = State::Finished;
-                    VadEvent::SpeechEnded {
+                    Some(VadEvent::SpeechEnded {
                         at_frame: level.end_frame,
                         reason,
-                    }
-                })
+                    })
+                } else {
+                    None
+                }
             }
             State::Finished => None,
         }
@@ -333,5 +404,28 @@ mod tests {
                 reason: SpeechEndReason::Silence,
             })
         );
+    }
+
+    #[test]
+    fn aggregates_completed_utterance_metrics() {
+        let mut detector = calibrated_detector();
+        detector.observe(level(-30.0, 4));
+        detector.observe(level(-30.0, 5));
+        detector.observe(level(-28.0, 6));
+        detector.observe(level(-48.0, 7));
+        detector.observe(level(-48.0, 8));
+
+        let metrics = detector.metrics().unwrap();
+        assert_eq!(metrics.noise_floor_dbfs, -50.0);
+        assert_eq!(metrics.start_threshold_dbfs, -38.0);
+        assert_eq!(metrics.end_threshold_dbfs, -44.0);
+        assert_eq!(metrics.peak_dbfs, -28.0);
+        assert!((metrics.mean_speech_dbfs - -29.333_334).abs() < 0.000_1);
+        assert_eq!(metrics.median_speech_dbfs, -30.0);
+        assert_eq!(metrics.detected_windows, 5);
+        assert_eq!(metrics.trailing_silence_windows, 2);
+        assert_eq!(metrics.speech_windows, 3);
+        assert_eq!(metrics.silence_windows, 2);
+        assert_eq!(metrics.end_reason, SpeechEndReason::Silence);
     }
 }

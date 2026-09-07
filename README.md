@@ -1,9 +1,9 @@
 # Jarvis
 
-A local voice assistant built incrementally in Rust. The current version calibrates the background
-noise, automatically records one spoken utterance, converts the audio to mono 16 kHz PCM,
-transcribes Russian speech with Whisper, and executes commands for telling the local time and
-opening Spotify.
+A local voice assistant built incrementally in Rust. The current version continuously listens for
+spoken utterances, converts them to mono 16 kHz PCM, transcribes Russian speech with one long-lived
+Whisper model, and executes commands for telling the local time and opening Spotify. Every detected
+utterance is also stored as part of a local research dataset.
 
 ## Prerequisites
 
@@ -36,6 +36,8 @@ Models whose names end in `.en` support English only and cannot transcribe Russi
 ```bash
 cargo run --release
 ```
+
+Jarvis returns to listening after each command. Stop it gracefully with `Ctrl+C`.
 
 The default model path is `models/ggml-small.bin`. A different model can be supplied as the first
 argument:
@@ -77,6 +79,33 @@ Whisper transcript -> parser -> Command -> action
 Whisper converts audio into text. The rule-based parser maps that text to a typed `Command`, and the
 corresponding action performs the work. Unsupported text becomes `Command::Unknown`, so adding new
 commands does not require changing the audio or speech-recognition layers.
+
+## Local dataset
+
+Detected utterances are stored locally and excluded from Git:
+
+```text
+data/
+├── utterances/
+│   └── <unique-id>.wav
+└── events.jsonl
+```
+
+Each line in `events.jsonl` is an independent JSON record containing:
+
+- schema version, unique ID, and UTC timestamp;
+- relative audio path and input-device metadata;
+- Whisper transcript;
+- predicted intent and extracted slots;
+- action status, response, or error;
+- aggregate VAD telemetry;
+- reserved `ground_truth` fields for a corrected transcript, correct intent, whether speech was
+  actually present, and free-form notes.
+
+The audio uses the microphone's native sample rate and channel count. This preserves more source
+information for later experiments than storing only the 16 kHz Whisper input. A failure during
+preprocessing, transcription, or action execution is recorded in `processing_error`; it does not
+terminate the command loop.
 
 ## Math used in the current pipeline
 
@@ -212,3 +241,46 @@ This difference is hysteresis: once speech has started, the signal may become qu
 immediately switching back to silence. Speech starts after three consecutive loud windows (60 ms)
 and ends after 30 consecutive quiet windows (600 ms). A 300 ms pre-roll is retained before the
 detected start so that threshold confirmation does not cut off the first phoneme.
+
+### VAD telemetry
+
+For the $K$ windows classified as speech, Jarvis stores their arithmetic mean and median dBFS:
+
+$$
+\overline{L}_{speech}=\frac{1}{K}\sum_{k=1}^{K}L_k,
+\qquad
+\widetilde{L}_{speech}=\mathrm{median}(L_1,\ldots,L_K).
+$$
+
+It also stores the peak window level, the calibrated noise floor, both thresholds, counts of
+speech/silence windows, and the stop reason. Saved-audio duration is calculated from its native
+frame count:
+
+$$
+t_{audio}=1000\frac{N_{frames}}{f_s}\text{ ms}.
+$$
+
+For analysis windows of duration $T=20\text{ ms}$, the final silence duration is
+
+$$
+t_{silence}=N_{trailing\ quiet}\,T.
+$$
+
+These aggregates are small enough to log for every utterance while retaining the information
+needed to compare noise conditions, threshold margins, premature stops, and false activations.
+
+Before running Whisper, a detected candidate must contain at least seven speech-classified windows:
+
+$$
+t_{minimum}=7\cdot20\text{ ms}=140\text{ ms}.
+$$
+
+Shorter candidates are not written to WAV, transcribed, or executed. A compact JSONL event is still
+stored with `audio_path: null`, `transcript: null`, VAD telemetry, and the execution status
+`rejected`. This keeps repeated clicks and impacts from filling audio storage while retaining their
+counts and level statistics. The terminal also reports their measured speech duration for live
+diagnostics.
+
+Whisper can describe short non-speech audio with annotations such as `[музыка]`, `[шум]`, or
+`[тишина]`. An annotation-only transcript is preserved in the dataset with the predicted intent
+`no_speech`, but receives the same `rejected` execution status and never reaches an action.

@@ -9,7 +9,7 @@ pub fn execute(command: &Command) -> Result<Option<String>> {
     match command {
         Command::TellTime => Ok(Some(time::current_time_message())),
         Command::PlayMusic => music::open_spotify().map(Some),
-        Command::Unknown { .. } => Ok(None),
+        Command::NoSpeech | Command::Unknown { .. } => Ok(None),
     }
 }
 

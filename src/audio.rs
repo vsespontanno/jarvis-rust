@@ -18,6 +18,7 @@ pub struct Recording {
     pub samples: Vec<i16>,
     pub sample_rate: u32,
     pub channels: u16,
+    pub device_name: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +35,7 @@ pub struct RecordingSession {
     levels: Receiver<AudioLevel>,
     sample_rate: u32,
     channels: u16,
+    device_name: String,
 }
 
 impl Recording {
@@ -72,6 +74,7 @@ impl Recording {
             samples: self.samples[sample_range].to_vec(),
             sample_rate: self.sample_rate,
             channels: self.channels,
+            device_name: self.device_name.clone(),
         })
     }
 }
@@ -129,6 +132,7 @@ impl RecordingSession {
             levels,
             sample_rate: config.sample_rate,
             channels: config.channels,
+            device_name,
         })
     }
 
@@ -155,6 +159,7 @@ impl RecordingSession {
             samples,
             sample_rate: self.sample_rate,
             channels: self.channels,
+            device_name: self.device_name,
         })
     }
 }

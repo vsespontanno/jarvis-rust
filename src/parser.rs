@@ -3,7 +3,9 @@ use crate::command::Command;
 pub fn parse(text: &str) -> Command {
     let words = normalized_words(text);
 
-    if asks_for_time(&words) {
+    if is_non_speech_annotation(&words) {
+        Command::NoSpeech
+    } else if asks_for_time(&words) {
         Command::TellTime
     } else if asks_to_play_music(&words) {
         Command::PlayMusic
@@ -12,6 +14,10 @@ pub fn parse(text: &str) -> Command {
             text: text.trim().to_owned(),
         }
     }
+}
+
+fn is_non_speech_annotation(words: &[String]) -> bool {
+    words.len() == 1 && matches!(words[0].as_str(), "музыка" | "шум" | "тишина")
 }
 
 fn normalized_words(text: &str) -> Vec<String> {
@@ -90,6 +96,23 @@ mod tests {
         ] {
             assert_eq!(parse(phrase), Command::PlayMusic, "phrase: {phrase}");
         }
+    }
+
+    #[test]
+    fn recognizes_whisper_non_speech_annotations() {
+        for transcript in ["[музыка]", "[ШУМ]", "тишина."] {
+            assert_eq!(parse(transcript), Command::NoSpeech);
+        }
+    }
+
+    #[test]
+    fn does_not_hide_annotations_inside_real_phrases() {
+        assert_eq!(
+            parse("слышен шум вентилятора"),
+            Command::Unknown {
+                text: "слышен шум вентилятора".to_owned()
+            }
+        );
     }
 
     #[test]
