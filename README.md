@@ -2,7 +2,8 @@
 
 A local voice assistant built incrementally in Rust. The current version calibrates the background
 noise, automatically records one spoken utterance, converts the audio to mono 16 kHz PCM,
-transcribes Russian speech with Whisper, and executes its first command: telling the local time.
+transcribes Russian speech with Whisper, and executes commands for telling the local time and
+opening Spotify.
 
 ## Prerequisites
 
@@ -60,6 +61,12 @@ Ask for the current local time using phrases such as:
 - `сколько времени`
 - `который сейчас час`
 - `скажи текущее время`
+- `включи музыку`
+- `запусти музыку`
+- `открой Spotify`
+
+Music commands open the installed Spotify application using the standard macOS application
+launcher.
 
 The command pipeline is intentionally separated into four stages:
 

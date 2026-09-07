@@ -73,7 +73,7 @@ fn main() -> Result<()> {
     println!("\nTranscript:\n{transcript}");
 
     let command = parser::parse(&transcript);
-    match actions::execute(&command) {
+    match actions::execute(&command).context("failed to execute the voice command")? {
         Some(response) => println!("\nJarvis:\n{response}"),
         None => println!("\nJarvis:\nКоманда пока не поддерживается."),
     }

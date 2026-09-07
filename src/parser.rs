@@ -5,6 +5,8 @@ pub fn parse(text: &str) -> Command {
 
     if asks_for_time(&words) {
         Command::TellTime
+    } else if asks_to_play_music(&words) {
+        Command::PlayMusic
     } else {
         Command::Unknown {
             text: text.trim().to_owned(),
@@ -28,6 +30,26 @@ fn asks_for_time(words: &[String]) -> bool {
         || (contains_which() && contains("час"))
         || ((contains("текущее") || contains("текущий")) && (contains("время") || contains("час")))
         || (contains("скажи") && contains("время"))
+}
+
+fn asks_to_play_music(words: &[String]) -> bool {
+    let contains_any = |expected: &[&str]| {
+        words
+            .iter()
+            .any(|word| expected.iter().any(|expected| word == expected))
+    };
+
+    let has_action = contains_any(&[
+        "включи",
+        "включить",
+        "запусти",
+        "запустить",
+        "открой",
+        "открыть",
+    ]);
+    let has_music = contains_any(&["музыка", "музыку", "spotify", "спотифай"]);
+
+    has_action && has_music
 }
 
 #[cfg(test)]
@@ -59,11 +81,33 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_supported_music_phrases() {
+        for phrase in [
+            "включи музыку",
+            "Запусти музыку, пожалуйста",
+            "открой Spotify",
+            "включить спотифай",
+        ] {
+            assert_eq!(parse(phrase), Command::PlayMusic, "phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn mentioning_music_without_an_action_is_not_a_command() {
+        assert_eq!(
+            parse("музыка помогает работать"),
+            Command::Unknown {
+                text: "музыка помогает работать".to_owned()
+            }
+        );
+    }
+
+    #[test]
     fn preserves_unknown_text_without_outer_whitespace() {
         assert_eq!(
-            parse("  включи музыку  "),
+            parse("  расскажи анекдот  "),
             Command::Unknown {
-                text: "включи музыку".to_owned()
+                text: "расскажи анекдот".to_owned()
             }
         );
     }
