@@ -56,6 +56,28 @@ RUST_LOG=debug cargo run --release
 The first launch may require enabling microphone access for Terminal in **System Settings → Privacy
 & Security → Microphone**.
 
+## Changelog workflow
+
+Create one fragment for each notable user-facing or architectural change:
+
+```bash
+changie new
+```
+
+Choose `Added`, `Changed`, `Fixed`, or `Removed` and describe the result rather than the
+implementation details. Small refactors do not need a fragment.
+
+At the next completed checkpoint, batch a minor release and regenerate the changelog:
+
+```bash
+changie batch minor
+changie merge
+```
+
+Then update the version in `Cargo.toml` to match and commit the release. Use `changie batch patch`
+instead when a checkpoint contains only backward-compatible fixes. Version `1.0.0` is reserved for
+the first stable Jarvis release; early checkpoints use `0.x.y` versions.
+
 ## Supported commands
 
 Ask for the current local time using phrases such as:
