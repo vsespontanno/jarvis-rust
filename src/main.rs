@@ -1,4 +1,7 @@
+mod actions;
 mod audio;
+mod command;
+mod parser;
 mod preprocessing;
 mod stt;
 mod vad;
@@ -68,6 +71,12 @@ fn main() -> Result<()> {
         .context("speech recognition failed")?;
 
     println!("\nTranscript:\n{transcript}");
+
+    let command = parser::parse(&transcript);
+    match actions::execute(&command) {
+        Some(response) => println!("\nJarvis:\n{response}"),
+        None => println!("\nJarvis:\nКоманда пока не поддерживается."),
+    }
 
     Ok(())
 }

@@ -1,8 +1,8 @@
 # Jarvis
 
 A local voice assistant built incrementally in Rust. The current version calibrates the background
-noise, automatically records one spoken utterance, converts the audio to mono 16 kHz PCM, and
-transcribes Russian speech with Whisper.
+noise, automatically records one spoken utterance, converts the audio to mono 16 kHz PCM,
+transcribes Russian speech with Whisper, and executes its first command: telling the local time.
 
 ## Prerequisites
 
@@ -52,6 +52,24 @@ RUST_LOG=debug cargo run --release
 
 The first launch may require enabling microphone access for Terminal in **System Settings → Privacy
 & Security → Microphone**.
+
+## Supported commands
+
+Ask for the current local time using phrases such as:
+
+- `сколько времени`
+- `который сейчас час`
+- `скажи текущее время`
+
+The command pipeline is intentionally separated into four stages:
+
+```text
+Whisper transcript -> parser -> Command -> action
+```
+
+Whisper converts audio into text. The rule-based parser maps that text to a typed `Command`, and the
+corresponding action performs the work. Unsupported text becomes `Command::Unknown`, so adding new
+commands does not require changing the audio or speech-recognition layers.
 
 ## Math used in the current pipeline
 
