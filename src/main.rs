@@ -10,6 +10,7 @@ mod vad;
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsStr,
     io::{self, Write},
     path::PathBuf,
     sync::{
@@ -32,6 +33,7 @@ const MINIMUM_SPEECH_DURATION: Duration = Duration::from_millis(140);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
+const DATASET_REPORT_FLAG: &str = "--dataset-report";
 
 struct CapturedUtterance {
     recording: audio::Recording,
@@ -39,11 +41,19 @@ struct CapturedUtterance {
 }
 
 fn main() -> Result<()> {
+    let first_argument = env::args_os().nth(1);
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_REPORT_FLAG)) {
+        let events_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DATASET_PATH).join("events.jsonl"));
+        return dataset::print_report(&events_path);
+    }
+
     init_logging();
     let running = install_shutdown_handler()?;
 
-    let model_path = env::args_os()
-        .nth(1)
+    let model_path = first_argument
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH));
 

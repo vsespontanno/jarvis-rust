@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::Recording;
 
+mod report;
+
+pub use report::print_report;
+
 const SCHEMA_VERSION: u8 = 1;
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -175,6 +179,18 @@ impl ExecutionResult {
             status: ExecutionStatus::NotAttempted,
             response: None,
             error: None,
+        }
+    }
+}
+
+impl ExecutionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotAttempted => "not_attempted",
+            Self::Rejected => "rejected",
+            Self::Succeeded => "succeeded",
+            Self::Unsupported => "unsupported",
+            Self::Failed => "failed",
         }
     }
 }

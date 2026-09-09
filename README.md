@@ -90,7 +90,8 @@ Ask for the current local time using phrases such as:
 - `открой Spotify`
 
 Music commands open the installed Spotify application using the standard macOS application
-launcher.
+launcher. The parser also accepts observed Whisper substitutions such as `открою Spotify` and
+`спотик`.
 
 The command pipeline is intentionally separated into four stages:
 
@@ -128,6 +129,31 @@ The audio uses the microphone's native sample rate and channel count. This prese
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
 preprocessing, transcription, or action execution is recorded in `processing_error`; it does not
 terminate the command loop.
+
+Print a read-only summary without loading the microphone or Whisper model:
+
+```bash
+cargo run --release -- --dataset-report
+```
+
+Pass a different JSON Lines file after the flag when needed:
+
+```bash
+cargo run --release -- --dataset-report /path/to/events.jsonl
+```
+
+The report includes execution and intent counts, rejected short candidates, Whisper non-speech
+annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
+speech-window count, and noise floor.
+
+For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
+
+$$
+P_{95}=x_{\lceil 0.95n \rceil}.
+$$
+
+Unlike the maximum, p95 shows the upper edge of typical observations without being dominated by a
+single extreme sample.
 
 ## Math used in the current pipeline
 

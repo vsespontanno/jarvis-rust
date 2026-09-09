@@ -51,9 +51,10 @@ fn asks_to_play_music(words: &[String]) -> bool {
         "запусти",
         "запустить",
         "открой",
+        "открою",
         "открыть",
     ]);
-    let has_music = contains_any(&["музыка", "музыку", "spotify", "спотифай"]);
+    let has_music = contains_any(&["музыка", "музыку", "spotify", "спотифай", "спотик"]);
 
     has_action && has_music
 }
@@ -92,7 +93,9 @@ mod tests {
             "включи музыку",
             "Запусти музыку, пожалуйста",
             "открой Spotify",
+            "Открою Spotify",
             "включить спотифай",
+            "включи спотик",
         ] {
             assert_eq!(parse(phrase), Command::PlayMusic, "phrase: {phrase}");
         }
