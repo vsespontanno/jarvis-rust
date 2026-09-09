@@ -93,6 +93,9 @@ Ask for the current local time using phrases such as:
 - `включи музыку`
 - `запусти музыку`
 - `открой Spotify`
+- `поставь таймер на 30 секунд`
+- `поставь таймер на пять минут`
+- `включи таймер на 1 час 30 минут`
 
 Music commands open the installed Spotify application using the standard macOS application
 launcher. The parser also accepts observed Whisper substitutions such as `открою Spotify` and
@@ -102,6 +105,13 @@ If the entire Whisper transcript is formatted as a sound annotation in square br
 parentheses, or asterisks—for example `[музыка]`, `(звук от джанра)`, or `*хм*`—Jarvis records it as
 the `no_speech` intent and rejects it without executing an action. Wrapped text is always rejected,
 even if it happens to contain command words; ordinary unwrapped commands are unaffected.
+
+Timers run in Jarvis itself without blocking the listening loop. When a timer expires, audio capture
+is paused, Jarvis repeats the macOS `Submarine` sound while a visible alert waits for the `OK`
+button. Pressing `OK` stops the sound and resumes capture, so the alert cannot activate Jarvis
+itself. Active timers are not persisted and are cancelled when the Jarvis process exits. The first
+version accepts durations up to 24 hours using digits or Russian number words from one through
+ninety-nine.
 
 The command pipeline is intentionally separated into four stages:
 
