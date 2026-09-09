@@ -1,0 +1,3 @@
+kind: Changed
+body: The microphone stream stays open for the process lifetime and VAD calibration is reused across consecutive commands.
+time: 2026-09-10T00:39:04.057698+03:00

@@ -114,6 +114,28 @@ impl VadDetector {
         self.metrics
     }
 
+    pub fn is_calibrated(&self) -> bool {
+        self.noise_floor_dbfs.is_some()
+    }
+
+    pub fn noise_floor_dbfs(&self) -> Option<f32> {
+        self.noise_floor_dbfs
+    }
+
+    pub fn begin_utterance(&mut self) {
+        self.metrics = None;
+        self.state = if self.noise_floor_dbfs.is_some() {
+            State::Waiting {
+                loud_levels: Vec::with_capacity(self.config.speech_start_windows),
+                waited: 0,
+            }
+        } else {
+            State::Calibrating {
+                levels: Vec::with_capacity(self.config.calibration_windows),
+            }
+        };
+    }
+
     pub fn observe(&mut self, level: AudioLevel) -> Option<VadEvent> {
         match &mut self.state {
             State::Calibrating { levels } => {
@@ -427,5 +449,26 @@ mod tests {
         assert_eq!(metrics.speech_windows, 3);
         assert_eq!(metrics.silence_windows, 2);
         assert_eq!(metrics.end_reason, SpeechEndReason::Silence);
+    }
+
+    #[test]
+    fn reuses_calibration_for_the_next_utterance() {
+        let mut detector = calibrated_detector();
+        detector.observe(level(-30.0, 4));
+        detector.observe(level(-30.0, 5));
+        detector.observe(level(-48.0, 6));
+        detector.observe(level(-48.0, 7));
+        assert!(detector.metrics().is_some());
+
+        detector.begin_utterance();
+
+        assert!(detector.is_calibrated());
+        assert_eq!(detector.noise_floor_dbfs(), Some(-50.0));
+        assert!(detector.metrics().is_none());
+        assert!(detector.observe(level(-30.0, 1)).is_none());
+        assert_eq!(
+            detector.observe(level(-30.0, 2)),
+            Some(VadEvent::SpeechStarted { at_frame: 2 })
+        );
     }
 }

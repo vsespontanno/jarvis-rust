@@ -60,14 +60,24 @@ fn main() -> Result<()> {
     println!("Loading Whisper model from {}...", model_path.display());
     let transcriber = stt::WhisperTranscriber::load(&model_path)
         .context("failed to load the speech recognition model")?;
+    println!("Whisper model is ready.");
     let dataset = dataset::DatasetStore::open(DATASET_PATH)
         .context("failed to initialize the local dataset")?;
-    println!("Whisper model is ready.");
+    let expected_capture_duration =
+        CALIBRATION_DURATION + MAX_WAIT_FOR_SPEECH + MAX_SPEECH_DURATION;
+    let audio_input = audio::RecordingSession::start(expected_capture_duration, LEVEL_WINDOW)
+        .context("failed to open the default microphone")?;
+    let mut detector = vad::VadDetector::new(vad_config());
     println!("Jarvis is running. Press Ctrl+C to stop.");
 
     while running.load(Ordering::Relaxed) {
-        if let Err(error) = process_command(&transcriber, &dataset, &running)
-            && running.load(Ordering::Relaxed)
+        if let Err(error) = process_command(
+            &transcriber,
+            &dataset,
+            &audio_input,
+            &mut detector,
+            &running,
+        ) && running.load(Ordering::Relaxed)
         {
             eprintln!("\nCould not process this command: {error:#}");
         }
@@ -89,10 +99,12 @@ fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
 fn process_command(
     transcriber: &stt::WhisperTranscriber,
     dataset: &dataset::DatasetStore,
+    audio_input: &audio::RecordingSession,
+    detector: &mut vad::VadDetector,
     running: &AtomicBool,
 ) -> Result<()> {
-    let Some(captured) =
-        record_utterance(running).context("failed to capture a speech utterance")?
+    let Some(captured) = record_utterance(audio_input, detector, running)
+        .context("failed to capture a speech utterance")?
     else {
         return Ok(());
     };
@@ -229,11 +241,8 @@ fn init_logging() {
         .init();
 }
 
-fn record_utterance(running: &AtomicBool) -> Result<Option<CapturedUtterance>> {
-    let expected_duration = CALIBRATION_DURATION + MAX_WAIT_FOR_SPEECH + MAX_SPEECH_DURATION;
-    let session = audio::RecordingSession::start(expected_duration, LEVEL_WINDOW)
-        .context("failed to start recording from the default input device")?;
-    let mut detector = vad::VadDetector::new(vad::VadConfig {
+fn vad_config() -> vad::VadConfig {
+    vad::VadConfig {
         calibration_windows: windows(CALIBRATION_DURATION),
         speech_start_windows: windows(SPEECH_START_DURATION),
         speech_end_windows: windows(SPEECH_END_DURATION),
@@ -244,13 +253,31 @@ fn record_utterance(running: &AtomicBool) -> Result<Option<CapturedUtterance>> {
         minimum_start_level_dbfs: -35.0,
         minimum_end_level_dbfs: -40.0,
         noise_ema_alpha: 0.02,
-    });
+    }
+}
+
+fn record_utterance(
+    session: &audio::RecordingSession,
+    detector: &mut vad::VadDetector,
+    running: &AtomicBool,
+) -> Result<Option<CapturedUtterance>> {
+    let needs_calibration = !detector.is_calibrated();
+    detector.begin_utterance();
+    session.begin_capture()?;
     let mut speech_start_frame = None;
 
-    println!("Calibrating background noise for 1 second — stay quiet...");
+    if needs_calibration {
+        println!("Calibrating background noise for 1 second — stay quiet...");
+    } else {
+        let noise_floor = detector
+            .noise_floor_dbfs()
+            .expect("calibrated VAD has a noise floor");
+        println!("Listening... noise floor: {noise_floor:.1} dBFS");
+    }
 
     let (speech_end_frame, vad_metrics) = loop {
         if !running.load(Ordering::Relaxed) {
+            session.cancel_capture()?;
             return Ok(None);
         }
 
@@ -276,7 +303,8 @@ fn record_utterance(running: &AtomicBool) -> Result<Option<CapturedUtterance>> {
                         break (at_frame, metrics);
                     }
                     Some(vad::VadEvent::TimedOut) => {
-                        println!("\nNo speech detected. Recalibrating...");
+                        session.cancel_capture()?;
+                        println!("\nNo speech detected. Continuing to listen...");
                         return Ok(None);
                     }
                     None => {}
@@ -288,7 +316,9 @@ fn record_utterance(running: &AtomicBool) -> Result<Option<CapturedUtterance>> {
     };
 
     let speech_start_frame = speech_start_frame.context("speech ended before it started")?;
-    let recording = session.finish().context("failed to finish recording")?;
+    let recording = session
+        .finish_capture()
+        .context("failed to finish recording")?;
 
     let recording = recording.slice_frames(speech_start_frame..speech_end_frame)?;
     let duration_ms = (recording.frame_count() as f64 * 1_000.0 / f64::from(recording.sample_rate))

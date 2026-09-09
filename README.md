@@ -39,6 +39,11 @@ cargo run --release
 
 Jarvis returns to listening after each command. Stop it gracefully with `Ctrl+C`.
 
+The default microphone stream is opened once and stays alive until shutdown. VAD performs its
+one-second calibration only after startup; later utterances reuse the adaptive noise-floor estimate.
+Audio arriving while Whisper or an action is running is intentionally discarded instead of being
+queued as a delayed command.
+
 The default model path is `models/ggml-small.bin`. A different model can be supplied as the first
 argument:
 

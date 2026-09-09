@@ -1,0 +1,3 @@
+kind: Fixed
+body: Input device names are normalized so incidental surrounding whitespace does not split dataset statistics.
+time: 2026-09-10T00:43:48.713008+03:00

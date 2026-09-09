@@ -30,12 +30,13 @@ pub struct AudioLevel {
 }
 
 pub struct RecordingSession {
-    stream: Stream,
-    samples: Arc<Mutex<Vec<i16>>>,
+    _stream: Stream,
+    capture: Arc<Mutex<CaptureState>>,
     levels: Receiver<AudioLevel>,
     sample_rate: u32,
     channels: u16,
     device_name: String,
+    sample_capacity: usize,
 }
 
 impl Recording {
@@ -96,7 +97,6 @@ impl RecordingSession {
         let capacity = expected_frames
             .checked_mul(config.channels as usize)
             .context("recording buffer capacity overflowed")?;
-        let samples = Arc::new(Mutex::new(Vec::with_capacity(capacity)));
         let level_window_frames =
             (config.sample_rate as f64 * level_window.as_secs_f64()).round() as usize;
         ensure!(
@@ -105,10 +105,11 @@ impl RecordingSession {
         );
         let level_channel_capacity = expected_frames.div_ceil(level_window_frames) + 1;
         let (level_sender, levels) = sync_channel(level_channel_capacity);
+        let capture = Arc::new(Mutex::new(CaptureState::new(capacity, level_window_frames)));
 
         let device_name = device
             .description()
-            .map(|description| description.name().to_owned())
+            .map(|description| description.name().trim().to_owned())
             .unwrap_or_else(|_| "unknown device".into());
 
         println!(
@@ -120,20 +121,31 @@ impl RecordingSession {
             &device,
             &config,
             sample_format,
-            Arc::clone(&samples),
+            Arc::clone(&capture),
             level_sender,
-            level_window_frames,
         )?;
         stream.play().context("could not start the input stream")?;
 
         Ok(Self {
-            stream,
-            samples,
+            _stream: stream,
+            capture,
             levels,
             sample_rate: config.sample_rate,
             channels: config.channels,
             device_name,
+            sample_capacity: capacity,
         })
+    }
+
+    pub fn begin_capture(&self) -> Result<()> {
+        let mut capture = self
+            .capture
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audio capture mutex was poisoned"))?;
+        capture.pause();
+        while self.levels.try_recv().is_ok() {}
+        capture.begin();
+        Ok(())
     }
 
     pub fn recv_level_timeout(
@@ -147,20 +159,63 @@ impl RecordingSession {
         self.sample_rate
     }
 
-    pub fn finish(self) -> Result<Recording> {
-        drop(self.stream);
-
-        let samples = Arc::try_unwrap(self.samples)
-            .map_err(|_| anyhow::anyhow!("audio callback still owns the sample buffer"))?
-            .into_inner()
-            .map_err(|_| anyhow::anyhow!("audio sample buffer mutex was poisoned"))?;
+    pub fn finish_capture(&self) -> Result<Recording> {
+        let mut capture = self
+            .capture
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audio capture mutex was poisoned"))?;
+        ensure!(capture.active, "audio capture is not active");
+        capture.active = false;
+        let samples = std::mem::replace(
+            &mut capture.samples,
+            Vec::with_capacity(self.sample_capacity),
+        );
+        capture.meter.reset();
 
         Ok(Recording {
             samples,
             sample_rate: self.sample_rate,
             channels: self.channels,
-            device_name: self.device_name,
+            device_name: self.device_name.clone(),
         })
+    }
+
+    pub fn cancel_capture(&self) -> Result<()> {
+        let mut capture = self
+            .capture
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audio capture mutex was poisoned"))?;
+        capture.pause();
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct CaptureState {
+    samples: Vec<i16>,
+    meter: LevelAccumulator,
+    active: bool,
+}
+
+impl CaptureState {
+    fn new(sample_capacity: usize, level_window_frames: usize) -> Self {
+        Self {
+            samples: Vec::with_capacity(sample_capacity),
+            meter: LevelAccumulator::new(level_window_frames),
+            active: false,
+        }
+    }
+
+    fn begin(&mut self) {
+        self.samples.clear();
+        self.meter.reset();
+        self.active = true;
+    }
+
+    fn pause(&mut self) {
+        self.active = false;
+        self.samples.clear();
+        self.meter.reset();
     }
 }
 
@@ -202,74 +257,49 @@ impl LevelAccumulator {
             end_frame: self.total_samples,
         })
     }
+
+    fn reset(&mut self) {
+        self.sum_squares = 0.0;
+        self.samples = 0;
+        self.total_samples = 0;
+    }
 }
 
 fn build_input_stream(
     device: &Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
-    samples: Arc<Mutex<Vec<i16>>>,
+    capture: Arc<Mutex<CaptureState>>,
     level_sender: SyncSender<AudioLevel>,
-    level_window_frames: usize,
 ) -> Result<Stream> {
     let error_callback = |error| eprintln!("Audio stream error: {error}");
     let channels = config.channels as usize;
 
     let stream = match sample_format {
-        SampleFormat::F32 => {
-            let mut meter = LevelAccumulator::new(level_window_frames);
-            device.build_input_stream(
-                *config,
-                move |data: &[f32], _| {
-                    process_input(
-                        &samples,
-                        data,
-                        f32_to_i16,
-                        channels,
-                        &mut meter,
-                        &level_sender,
-                    )
-                },
-                error_callback,
-                None,
-            )?
-        }
-        SampleFormat::I16 => {
-            let mut meter = LevelAccumulator::new(level_window_frames);
-            device.build_input_stream(
-                *config,
-                move |data: &[i16], _| {
-                    process_input(
-                        &samples,
-                        data,
-                        |sample| sample,
-                        channels,
-                        &mut meter,
-                        &level_sender,
-                    )
-                },
-                error_callback,
-                None,
-            )?
-        }
-        SampleFormat::U16 => {
-            let mut meter = LevelAccumulator::new(level_window_frames);
-            device.build_input_stream(
-                *config,
-                move |data: &[u16], _| {
-                    process_input(
-                        &samples,
-                        data,
-                        u16_to_i16,
-                        channels,
-                        &mut meter,
-                        &level_sender,
-                    )
-                },
-                error_callback,
-                None,
-            )?
-        }
+        SampleFormat::F32 => device.build_input_stream(
+            *config,
+            move |data: &[f32], _| {
+                process_input(&capture, data, f32_to_i16, channels, &level_sender)
+            },
+            error_callback,
+            None,
+        )?,
+        SampleFormat::I16 => device.build_input_stream(
+            *config,
+            move |data: &[i16], _| {
+                process_input(&capture, data, |sample| sample, channels, &level_sender)
+            },
+            error_callback,
+            None,
+        )?,
+        SampleFormat::U16 => device.build_input_stream(
+            *config,
+            move |data: &[u16], _| {
+                process_input(&capture, data, u16_to_i16, channels, &level_sender)
+            },
+            error_callback,
+            None,
+        )?,
         other => bail!("unsupported input sample format: {other:?}"),
     };
 
@@ -277,24 +307,25 @@ fn build_input_stream(
 }
 
 fn process_input<T: Copy>(
-    destination: &Mutex<Vec<i16>>,
+    capture: &Mutex<CaptureState>,
     input: &[T],
     convert: impl Fn(T) -> i16,
     channels: usize,
-    meter: &mut LevelAccumulator,
     level_sender: &SyncSender<AudioLevel>,
 ) {
-    if let Ok(mut destination) = destination.try_lock() {
+    if let Ok(mut capture) = capture.try_lock()
+        && capture.active
+    {
         for frame in input.chunks_exact(channels) {
             let mut mono = 0.0;
 
             for &sample in frame {
                 let sample = convert(sample);
-                destination.push(sample);
+                capture.samples.push(sample);
                 mono += sample as f32 / 32_768.0;
             }
 
-            if let Some(level) = meter.push(mono / channels as f32) {
+            if let Some(level) = capture.meter.push(mono / channels as f32) {
                 let _ = level_sender.try_send(level);
             }
         }
@@ -352,5 +383,32 @@ mod tests {
 
         assert_eq!(silence.rms, 0.0);
         assert_eq!(silence.dbfs, -240.0);
+    }
+
+    #[test]
+    fn capture_state_does_not_accumulate_audio_while_paused() {
+        let mut capture = CaptureState::new(16, 2);
+        let (level_sender, levels) = sync_channel(2);
+
+        process_input(
+            &Mutex::new(capture),
+            &[1_i16, 2],
+            |sample| sample,
+            1,
+            &level_sender,
+        );
+        assert!(levels.try_recv().is_err());
+
+        capture = CaptureState::new(16, 2);
+        capture.begin();
+        let capture = Mutex::new(capture);
+        process_input(&capture, &[1_i16, 2], |sample| sample, 1, &level_sender);
+        assert!(levels.try_recv().is_ok());
+
+        let mut capture = capture.into_inner().unwrap();
+        assert_eq!(capture.samples, [1, 2]);
+        capture.pause();
+        assert!(capture.samples.is_empty());
+        assert!(!capture.active);
     }
 }

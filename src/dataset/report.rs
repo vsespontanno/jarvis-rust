@@ -76,7 +76,7 @@ impl DatasetReport {
                 &mut execution_statuses,
                 record.execution_result.status.as_str(),
             );
-            increment(&mut devices, &record.input.device);
+            increment(&mut devices, record.input.device.trim());
 
             if let Some(prediction) = &record.prediction {
                 increment(&mut intents, &prediction.intent);
@@ -268,11 +268,12 @@ mod tests {
 
     #[test]
     fn aggregates_json_lines_records() {
-        let records = [
+        let mut records = [
             record("short", ExecutionStatus::Rejected, None, 4),
             record("time", ExecutionStatus::Succeeded, Some("tell_time"), 23),
             record("noise", ExecutionStatus::Rejected, Some("no_speech"), 38),
         ];
+        records[0].input.device.push(' ');
         let jsonl = records
             .iter()
             .map(serde_json::to_string)
@@ -288,6 +289,7 @@ mod tests {
         assert_eq!(report.non_speech_annotations, 1);
         assert_eq!(report.execution_statuses["rejected"], 2);
         assert_eq!(report.intents["tell_time"], 1);
+        assert_eq!(report.devices["Test microphone"], 3);
         assert_eq!(report.speech_windows.unwrap().median, 23.0);
     }
 
