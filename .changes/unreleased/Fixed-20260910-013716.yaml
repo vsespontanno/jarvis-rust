@@ -1,0 +1,3 @@
+kind: Fixed
+body: Fully wrapped Whisper sound annotations are rejected as non-speech instead of reaching command execution.
+time: 2026-09-10T01:37:16.507118+03:00

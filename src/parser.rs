@@ -3,7 +3,7 @@ use crate::command::Command;
 pub fn parse(text: &str) -> Command {
     let words = normalized_words(text);
 
-    if is_non_speech_annotation(&words) {
+    if is_non_speech_annotation(text, &words) {
         Command::NoSpeech
     } else if asks_for_time(&words) {
         Command::TellTime
@@ -16,8 +16,14 @@ pub fn parse(text: &str) -> Command {
     }
 }
 
-fn is_non_speech_annotation(words: &[String]) -> bool {
-    words.len() == 1 && matches!(words[0].as_str(), "музыка" | "шум" | "тишина")
+fn is_non_speech_annotation(text: &str, words: &[String]) -> bool {
+    let trimmed = text.trim();
+    let fully_wrapped = [('[', ']'), ('(', ')'), ('*', '*')]
+        .iter()
+        .any(|&(start, end)| trimmed.starts_with(start) && trimmed.ends_with(end));
+
+    (!words.is_empty() && fully_wrapped)
+        || (words.len() == 1 && matches!(words[0].as_str(), "музыка" | "шум" | "тишина"))
 }
 
 fn normalized_words(text: &str) -> Vec<String> {
@@ -103,9 +109,23 @@ mod tests {
 
     #[test]
     fn recognizes_whisper_non_speech_annotations() {
-        for transcript in ["[музыка]", "[ШУМ]", "тишина."] {
+        for transcript in [
+            "[музыка]",
+            "[ШУМ]",
+            "тишина.",
+            "[звук от моего слоя]",
+            "(звук от джанра)",
+            "*хм*",
+            "*клап* *клап*",
+        ] {
             assert_eq!(parse(transcript), Command::NoSpeech);
         }
+    }
+
+    #[test]
+    fn wrapped_annotation_never_executes_a_command() {
+        assert_eq!(parse("[включи музыку]"), Command::NoSpeech);
+        assert_eq!(parse("(который час)"), Command::NoSpeech);
     }
 
     #[test]

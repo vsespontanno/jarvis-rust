@@ -98,6 +98,11 @@ Music commands open the installed Spotify application using the standard macOS a
 launcher. The parser also accepts observed Whisper substitutions such as `открою Spotify` and
 `спотик`.
 
+If the entire Whisper transcript is formatted as a sound annotation in square brackets,
+parentheses, or asterisks—for example `[музыка]`, `(звук от джанра)`, or `*хм*`—Jarvis records it as
+the `no_speech` intent and rejects it without executing an action. Wrapped text is always rejected,
+even if it happens to contain command words; ordinary unwrapped commands are unaffected.
+
 The command pipeline is intentionally separated into four stages:
 
 ```text
