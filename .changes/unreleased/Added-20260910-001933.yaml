@@ -1,3 +1,0 @@
-kind: Added
-body: A read-only dataset report summarizes execution outcomes, intents, and VAD distributions without loading the speech pipeline.
-time: 2026-09-10T00:19:33.992463+03:00
