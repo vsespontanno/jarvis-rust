@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 
 use super::DatasetRecord;
+use crate::parser;
 
 #[derive(Debug, PartialEq)]
 struct DatasetReport {
@@ -18,8 +19,13 @@ struct DatasetReport {
     processing_errors: usize,
     short_rejections: usize,
     non_speech_annotations: usize,
+    replayed_transcripts: usize,
+    changed_predictions: usize,
+    resolved_unknowns: usize,
     execution_statuses: BTreeMap<String, usize>,
     intents: BTreeMap<String, usize>,
+    current_intents: BTreeMap<String, usize>,
+    prediction_changes: BTreeMap<String, usize>,
     devices: BTreeMap<String, usize>,
     end_reasons: BTreeMap<String, usize>,
     durations_ms: Option<Distribution>,
@@ -65,11 +71,16 @@ impl DatasetReport {
     fn from_records(records: &[DatasetRecord]) -> Self {
         let mut execution_statuses = BTreeMap::new();
         let mut intents = BTreeMap::new();
+        let mut current_intents = BTreeMap::new();
+        let mut prediction_changes = BTreeMap::new();
         let mut devices = BTreeMap::new();
         let mut end_reasons = BTreeMap::new();
         let mut durations_ms = Vec::new();
         let mut speech_windows = Vec::new();
         let mut noise_floor_dbfs = Vec::new();
+        let mut replayed_transcripts = 0;
+        let mut changed_predictions = 0;
+        let mut resolved_unknowns = 0;
 
         for record in records {
             increment(
@@ -80,6 +91,25 @@ impl DatasetReport {
 
             if let Some(prediction) = &record.prediction {
                 increment(&mut intents, &prediction.intent);
+            }
+
+            if let Some(transcript) = &record.transcript {
+                replayed_transcripts += 1;
+                let current_intent = parser::parse(transcript).intent_name();
+                increment(&mut current_intents, current_intent);
+
+                if let Some(stored) = &record.prediction
+                    && stored.intent != current_intent
+                {
+                    changed_predictions += 1;
+                    if stored.intent == "unknown" && current_intent != "unknown" {
+                        resolved_unknowns += 1;
+                    }
+                    increment(
+                        &mut prediction_changes,
+                        &format!("{} -> {current_intent}", stored.intent),
+                    );
+                }
             }
 
             if let Some(vad) = &record.vad {
@@ -122,8 +152,13 @@ impl DatasetReport {
                         .is_some_and(|prediction| prediction.intent == "no_speech")
                 })
                 .count(),
+            replayed_transcripts,
+            changed_predictions,
+            resolved_unknowns,
             execution_statuses,
             intents,
+            current_intents,
+            prediction_changes,
             devices,
             end_reasons,
             durations_ms: Distribution::from_values(durations_ms),
@@ -169,8 +204,25 @@ impl fmt::Display for DatasetReport {
             "Whisper non-speech annotations: {}",
             self.non_speech_annotations
         )?;
+        writeln!(
+            formatter,
+            "Replayed transcripts: {}",
+            self.replayed_transcripts
+        )?;
+        writeln!(
+            formatter,
+            "Changed predictions: {}",
+            self.changed_predictions
+        )?;
+        writeln!(
+            formatter,
+            "Resolved historical unknowns: {}",
+            self.resolved_unknowns
+        )?;
         write_counts(formatter, "Execution", &self.execution_statuses)?;
-        write_counts(formatter, "Intents", &self.intents)?;
+        write_counts(formatter, "Stored intents", &self.intents)?;
+        write_counts(formatter, "Current parser intents", &self.current_intents)?;
+        write_counts(formatter, "Prediction changes", &self.prediction_changes)?;
         write_counts(formatter, "Input devices", &self.devices)?;
         write_counts(formatter, "VAD end reasons", &self.end_reasons)?;
 
@@ -304,6 +356,25 @@ mod tests {
                 maximum: 4.0,
             })
         );
+    }
+
+    #[test]
+    fn replays_historical_prediction_with_current_parser() {
+        let mut historical = record(
+            "historical",
+            ExecutionStatus::Unsupported,
+            Some("unknown"),
+            20,
+        );
+        historical.transcript = Some("Открою Spotify.".to_owned());
+
+        let report = DatasetReport::from_records(&[historical]);
+
+        assert_eq!(report.replayed_transcripts, 1);
+        assert_eq!(report.changed_predictions, 1);
+        assert_eq!(report.resolved_unknowns, 1);
+        assert_eq!(report.current_intents["play_music"], 1);
+        assert_eq!(report.prediction_changes["unknown -> play_music"], 1);
     }
 
     #[test]

@@ -154,7 +154,9 @@ cargo run --release -- --dataset-report /path/to/events.jsonl
 
 The report includes execution and intent counts, rejected short candidates, Whisper non-speech
 annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
-speech-window count, and noise floor.
+speech-window count, and noise floor. It also replays saved transcripts through the current parser
+and reports changed predictions without modifying the historical JSONL records. This makes parser
+improvements visible as transitions such as `unknown -> play_music`.
 
 For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
 
