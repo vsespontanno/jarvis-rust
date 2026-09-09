@@ -39,6 +39,11 @@ cargo run --release
 
 Jarvis returns to listening after each command. Stop it gracefully with `Ctrl+C`.
 
+The default microphone stream is opened once and stays alive until shutdown. VAD performs its
+one-second calibration only after startup; later utterances reuse the adaptive noise-floor estimate.
+Audio arriving while Whisper or an action is running is intentionally discarded instead of being
+queued as a delayed command.
+
 The default model path is `models/ggml-small.bin`. A different model can be supplied as the first
 argument:
 
@@ -88,9 +93,25 @@ Ask for the current local time using phrases such as:
 - `включи музыку`
 - `запусти музыку`
 - `открой Spotify`
+- `поставь таймер на 30 секунд`
+- `поставь таймер на пять минут`
+- `включи таймер на 1 час 30 минут`
 
 Music commands open the installed Spotify application using the standard macOS application
-launcher.
+launcher. The parser also accepts observed Whisper substitutions such as `открою Spotify` and
+`спотик`.
+
+If the entire Whisper transcript is formatted as a sound annotation in square brackets,
+parentheses, or asterisks—for example `[музыка]`, `(звук от джанра)`, or `*хм*`—Jarvis records it as
+the `no_speech` intent and rejects it without executing an action. Wrapped text is always rejected,
+even if it happens to contain command words; ordinary unwrapped commands are unaffected.
+
+Timers run in Jarvis itself without blocking the listening loop. When a timer expires, audio capture
+is paused, Jarvis repeats the macOS `Submarine` sound while a visible alert waits for the `OK`
+button. Pressing `OK` stops the sound and resumes capture, so the alert cannot activate Jarvis
+itself. Active timers are not persisted and are cancelled when the Jarvis process exits. The first
+version accepts durations up to 24 hours using digits or Russian number words from one through
+ninety-nine.
 
 The command pipeline is intentionally separated into four stages:
 
@@ -128,6 +149,33 @@ The audio uses the microphone's native sample rate and channel count. This prese
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
 preprocessing, transcription, or action execution is recorded in `processing_error`; it does not
 terminate the command loop.
+
+Print a read-only summary without loading the microphone or Whisper model:
+
+```bash
+cargo run --release -- --dataset-report
+```
+
+Pass a different JSON Lines file after the flag when needed:
+
+```bash
+cargo run --release -- --dataset-report /path/to/events.jsonl
+```
+
+The report includes execution and intent counts, rejected short candidates, Whisper non-speech
+annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
+speech-window count, and noise floor. It also replays saved transcripts through the current parser
+and reports changed predictions without modifying the historical JSONL records. This makes parser
+improvements visible as transitions such as `unknown -> play_music`.
+
+For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
+
+$$
+P_{95}=x_{\lceil 0.95n \rceil}.
+$$
+
+Unlike the maximum, p95 shows the upper edge of typical observations without being dominated by a
+single extreme sample.
 
 ## Math used in the current pipeline
 
