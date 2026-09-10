@@ -8,7 +8,9 @@ const LEGACY_LEVEL_WINDOW_MS: u64 = 20;
 #[derive(Debug)]
 pub(super) struct DatasetAnalysis {
     pub labeled: usize,
+    pub sources: SourceEvaluation,
     pub detection: DetectionEvaluation,
+    pub safety: SafetyEvaluation,
     pub stt: SttEvaluation,
     pub historical_parser: ParserEvaluation,
     pub current_parser: ParserEvaluation,
@@ -16,6 +18,28 @@ pub(super) struct DatasetAnalysis {
     pub non_speech_vad: VadStatistics,
     pub thresholds: Vec<ThresholdEvaluation>,
     pub candidate_thresholds: Vec<u64>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SourceEvaluation {
+    pub natural: usize,
+    pub prompted: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SafetyEvaluation {
+    pub negative_samples: usize,
+    pub historical_false_commands: usize,
+    pub current_false_commands: usize,
+    pub historical_mistakes: Vec<SafetyMistake>,
+    pub current_mistakes: Vec<SafetyMistake>,
+}
+
+#[derive(Debug)]
+pub(super) struct SafetyMistake {
+    pub event_id: String,
+    pub predicted: String,
+    pub transcript: String,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +142,8 @@ pub(super) fn analyze(
         .collect::<Vec<_>>();
 
     let detection = evaluate_detection(&samples);
+    let sources = evaluate_sources(&samples);
+    let safety = evaluate_safety(&samples);
     let stt = evaluate_stt(&samples);
     let historical_parser = evaluate_parser(&samples, ParserSource::Historical);
     let current_parser = evaluate_parser(&samples, ParserSource::Current);
@@ -128,7 +154,9 @@ pub(super) fn analyze(
 
     DatasetAnalysis {
         labeled: samples.len(),
+        sources,
         detection,
+        safety,
         stt,
         historical_parser,
         current_parser,
@@ -136,6 +164,67 @@ pub(super) fn analyze(
         non_speech_vad,
         thresholds,
         candidate_thresholds,
+    }
+}
+
+fn evaluate_sources(samples: &[(&DatasetRecord, &DatasetLabel)]) -> SourceEvaluation {
+    let mut result = SourceEvaluation::default();
+    for (event, _) in samples {
+        if event.collection.is_some() {
+            result.prompted += 1;
+        } else {
+            result.natural += 1;
+        }
+    }
+    result
+}
+
+fn evaluate_safety(samples: &[(&DatasetRecord, &DatasetLabel)]) -> SafetyEvaluation {
+    let mut result = SafetyEvaluation::default();
+    for (event, _) in samples.iter().filter(|(_, label)| {
+        !label.actual_speech || matches!(label.correct_intent.as_str(), "unknown" | "no_speech")
+    }) {
+        result.negative_samples += 1;
+        let historical = event
+            .prediction
+            .as_ref()
+            .map_or("unknown", |prediction| prediction.intent.as_str());
+        if is_actionable_intent(historical) {
+            result.historical_false_commands += 1;
+            result.historical_mistakes.push(SafetyMistake {
+                event_id: event.id.clone(),
+                predicted: historical.to_owned(),
+                transcript: event.transcript.clone().unwrap_or_default(),
+            });
+        }
+        let current = event.transcript.as_deref().map_or("unknown", |transcript| {
+            parser::parse(transcript).intent_name()
+        });
+        if is_actionable_intent(current) {
+            result.current_false_commands += 1;
+            result.current_mistakes.push(SafetyMistake {
+                event_id: event.id.clone(),
+                predicted: current.to_owned(),
+                transcript: event.transcript.clone().unwrap_or_default(),
+            });
+        }
+    }
+    result
+}
+
+fn is_actionable_intent(intent: &str) -> bool {
+    !matches!(intent, "unknown" | "no_speech")
+}
+
+impl SafetyEvaluation {
+    pub fn historical_false_command_rate(&self) -> Option<f64> {
+        (self.negative_samples > 0)
+            .then(|| self.historical_false_commands as f64 / self.negative_samples as f64)
+    }
+
+    pub fn current_false_command_rate(&self) -> Option<f64> {
+        (self.negative_samples > 0)
+            .then(|| self.current_false_commands as f64 / self.negative_samples as f64)
     }
 }
 
@@ -504,6 +593,7 @@ mod tests {
             id: id.to_owned(),
             timestamp: "2026-09-10T00:00:00Z".to_owned(),
             provenance: None,
+            collection: None,
             audio_path: Some(format!("utterances/{id}.wav")),
             input: InputMetadata {
                 device: "Test".to_owned(),
@@ -591,6 +681,41 @@ mod tests {
         assert_eq!(analysis.historical_parser.correct, 0);
         assert_eq!(analysis.current_parser.correct, 1);
         assert_eq!(analysis.current_parser.total, 1);
+    }
+
+    #[test]
+    fn measures_false_commands_on_negative_samples() {
+        let records = [
+            event(
+                "false-command",
+                Some("включи музыку"),
+                Some("play_music"),
+                20,
+            ),
+            event("safe-unknown", Some("как дела"), Some("unknown"), 20),
+            event("supported", Some("который час"), Some("tell_time"), 20),
+        ];
+        let labels = BTreeMap::from([
+            (
+                "false-command".to_owned(),
+                label("false-command", true, Some("включи музыку"), "unknown"),
+            ),
+            (
+                "safe-unknown".to_owned(),
+                label("safe-unknown", true, Some("как дела"), "unknown"),
+            ),
+            (
+                "supported".to_owned(),
+                label("supported", true, Some("который час"), "tell_time"),
+            ),
+        ]);
+
+        let safety = analyze(&records, &labels).safety;
+
+        assert_eq!(safety.negative_samples, 2);
+        assert_eq!(safety.historical_false_commands, 1);
+        assert_eq!(safety.current_false_commands, 1);
+        assert_eq!(safety.current_false_command_rate(), Some(0.5));
     }
 
     #[test]

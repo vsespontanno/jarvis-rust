@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "campaign": "baseline-ru-v1",
+  "prompts": [
+    { "id": "time-01", "transcript": "который час", "intent": "tell_time" },
+    { "id": "time-02", "transcript": "сколько сейчас времени", "intent": "tell_time" },
+    { "id": "time-03", "transcript": "скажи текущее время", "intent": "tell_time" },
+    { "id": "time-04", "transcript": "подскажи который сейчас час", "intent": "tell_time" },
+    { "id": "music-01", "transcript": "включи музыку", "intent": "play_music" },
+    { "id": "music-02", "transcript": "открой Spotify", "intent": "play_music" },
+    { "id": "music-03", "transcript": "запусти Spotify", "intent": "play_music" },
+    { "id": "music-04", "transcript": "включи пожалуйста музыку", "intent": "play_music" },
+    { "id": "timer-01", "transcript": "поставь таймер на пять секунд", "intent": "set_timer" },
+    { "id": "timer-02", "transcript": "запусти таймер на одну минуту", "intent": "set_timer" },
+    { "id": "timer-03", "transcript": "поставь таймер на две минуты", "intent": "set_timer" },
+    { "id": "timer-04", "transcript": "поставь на тридцать секунд", "intent": "set_timer" },
+    { "id": "unknown-01", "transcript": "как у тебя дела", "intent": "unknown" },
+    { "id": "unknown-02", "transcript": "какая сегодня погода", "intent": "unknown" },
+    { "id": "unknown-03", "transcript": "расскажи что-нибудь интересное", "intent": "unknown" },
+    { "id": "unknown-04", "transcript": "я сейчас работаю над проектом", "intent": "unknown" }
+  ]
+}

@@ -13,13 +13,15 @@ use serde::{Deserialize, Serialize};
 use crate::audio::Recording;
 
 mod analysis;
+mod collection;
 mod report;
 mod review;
 
+pub use collection::{CollectionPlan, CollectionPrompt};
 pub use report::print_report;
 pub use review::review;
 
-const SCHEMA_VERSION: u8 = 2;
+const SCHEMA_VERSION: u8 = 3;
 const LABEL_SCHEMA_VERSION: u8 = 1;
 static ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -43,6 +45,8 @@ pub struct DatasetRecord {
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<CollectionMetadata>,
     pub audio_path: Option<String>,
     pub input: InputMetadata,
     pub transcript: Option<String>,
@@ -75,6 +79,21 @@ pub struct VadConfigMetadata {
     pub end_margin_db: f32,
     pub minimum_start_level_dbfs: f32,
     pub minimum_end_level_dbfs: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CollectionMetadata {
+    pub source: CollectionSource,
+    pub campaign: String,
+    pub prompt_id: String,
+    pub expected_transcript: String,
+    pub expected_intent: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionSource {
+    Prompted,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -209,6 +228,7 @@ impl DatasetRecord {
             id: sample.id.clone(),
             timestamp: sample.timestamp.clone(),
             provenance: Some(provenance),
+            collection: None,
             audio_path: Some(sample.audio_path.clone()),
             input: InputMetadata {
                 device: recording.device_name.clone(),
@@ -411,6 +431,31 @@ mod tests {
         assert!(json.contains("\"peak_dbfs\":-18.0"));
         assert!(json.contains("\"jarvis_version\":\"0.3.0\""));
         assert!(!json.contains("ground_truth"));
+        assert!(!json.contains("collection"));
+        assert_eq!(decoded.schema_version, 3);
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn serializes_prompted_collection_metadata() {
+        let sample = SampleDescriptor {
+            id: "prompted-1".to_owned(),
+            timestamp: "2026-09-10T12:00:00Z".to_owned(),
+            audio_path: "utterances/prompted-1.wav".to_owned(),
+        };
+        let mut record = DatasetRecord::new(&sample, &recording(), provenance());
+        record.collection = Some(CollectionMetadata {
+            source: CollectionSource::Prompted,
+            campaign: "baseline-ru-v1".to_owned(),
+            prompt_id: "time-01".to_owned(),
+            expected_transcript: "который час".to_owned(),
+            expected_intent: "tell_time".to_owned(),
+        });
+
+        let json = serde_json::to_string(&record).unwrap();
+        let decoded: DatasetRecord = serde_json::from_str(&json).unwrap();
+
+        assert!(json.contains("\"source\":\"prompted\""));
         assert_eq!(decoded, record);
     }
 

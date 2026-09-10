@@ -145,12 +145,26 @@ Each line in `events.jsonl` is an independent JSON record containing:
 - aggregate VAD telemetry;
 - legacy `ground_truth` fields when reading schema-version 1 events.
 
-New schema-version 2 events also include the Jarvis version, process session ID, Whisper model,
-parser version, and the VAD configuration used for that prediction. Actual noise floor and adaptive
-thresholds remain in per-event VAD telemetry. Older schema-version 1 records remain readable.
+Schema-version 2 events also include the Jarvis version, process session ID, Whisper model, parser
+version, and the VAD configuration used for that prediction. Schema-version 3 adds optional
+controlled-collection metadata. Actual noise floor and adaptive thresholds remain in per-event VAD
+telemetry. Older records remain readable.
 
 Raw events are never rewritten. Human ground truth is appended separately to `labels.jsonl` and
 linked to its source event by ID; if an event is labeled again, the latest label wins.
+
+Collect a controlled session from the tracked Russian baseline plan with:
+
+```bash
+cargo run --release -- --dataset-collect
+```
+
+The prompts live in `collection-prompts.json`; pass another plan path after the flag to use a
+different campaign. Enter starts capture, `s` skips a prompt, and `q` ends the session. The normal
+microphone, VAD, Whisper, and parser pipeline is reused, but voice actions are disabled. Each
+captured event receives `prompted` source metadata and an automatic label containing the expected
+transcript and intent. Natural and prompted samples therefore remain distinguishable, and session
+IDs can later keep recordings from the same run in the same train/test split.
 
 Start or resume interactive review with:
 
@@ -186,6 +200,7 @@ When labels exist beside the event file, the report evaluates each pipeline leve
   Whisper;
 - Whisper: normalized word errors on real speech only;
 - parser: historical and current accuracy, errors, and intent confusion on supported commands;
+- safety: false actionable intents on labeled non-speech and unsupported speech;
 - VAD: separate count/min/median/mean/max telemetry for speech and non-speech;
 - minimum speech duration: an offline threshold sweep from 40 through 500 ms showing speech recall
   and noise rejection.
@@ -214,6 +229,15 @@ $$
 
 These are offline calculations over labeled detections, not a measurement of all the silence that
 never activated Jarvis.
+
+For negative samples, the false-command rate is
+
+$$
+FCR=\frac{false\ actionable\ predictions}{negative\ samples}.
+$$
+
+A negative sample is either non-speech or speech whose correct intent is `unknown`/`no_speech`.
+This guards against improving command recall by making Jarvis dangerously eager to act.
 
 For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
 

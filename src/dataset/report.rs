@@ -255,6 +255,54 @@ fn write_pipeline_analysis(
         "\nLabeled pipeline evaluation: {} / {events}",
         analysis.labeled
     )?;
+    writeln!(formatter, "  Natural samples: {}", analysis.sources.natural)?;
+    writeln!(
+        formatter,
+        "  Prompted samples: {}",
+        analysis.sources.prompted
+    )?;
+
+    writeln!(formatter, "\nFalse command safety:")?;
+    writeln!(
+        formatter,
+        "  Negative samples (non-speech or unsupported speech): {}",
+        analysis.safety.negative_samples
+    )?;
+    writeln!(
+        formatter,
+        "  Historical false commands: {} / {} ({})",
+        analysis.safety.historical_false_commands,
+        analysis.safety.negative_samples,
+        format_rate(analysis.safety.historical_false_command_rate())
+    )?;
+    if !analysis.safety.historical_mistakes.is_empty() {
+        writeln!(formatter, "  Historical false-command cases:")?;
+        for mistake in &analysis.safety.historical_mistakes {
+            writeln!(
+                formatter,
+                "    {}: {} | \"{}\"",
+                mistake.event_id, mistake.predicted, mistake.transcript
+            )?;
+        }
+    }
+    writeln!(
+        formatter,
+        "  Current parser false commands: {} / {} ({})",
+        analysis.safety.current_false_commands,
+        analysis.safety.negative_samples,
+        format_rate(analysis.safety.current_false_command_rate())
+    )?;
+    if !analysis.safety.current_mistakes.is_empty() {
+        writeln!(formatter, "  Current false-command cases:")?;
+        for mistake in &analysis.safety.current_mistakes {
+            writeln!(
+                formatter,
+                "    {}: {} | \"{}\"",
+                mistake.event_id, mistake.predicted, mistake.transcript
+            )?;
+        }
+    }
+
     writeln!(formatter, "\nSpeech detection:")?;
     writeln!(formatter, "  Actual speech: {}", detection.actual_speech)?;
     writeln!(
@@ -530,6 +578,7 @@ mod tests {
             id: id.to_owned(),
             timestamp: "2026-09-10T00:00:00Z".to_owned(),
             provenance: None,
+            collection: None,
             audio_path: (speech_windows >= 7).then(|| format!("utterances/{id}.wav")),
             input: InputMetadata {
                 device: "Test microphone".to_owned(),
