@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use super::DatasetRecord;
+use super::{DatasetLabel, DatasetRecord, LabelStore};
 use crate::parser;
 
 #[derive(Debug, PartialEq)]
@@ -22,6 +22,11 @@ struct DatasetReport {
     replayed_transcripts: usize,
     changed_predictions: usize,
     resolved_unknowns: usize,
+    labeled_events: usize,
+    labeled_speech: usize,
+    labeled_non_speech: usize,
+    transcript_corrections: usize,
+    correct_intents: usize,
     execution_statuses: BTreeMap<String, usize>,
     intents: BTreeMap<String, usize>,
     current_intents: BTreeMap<String, usize>,
@@ -44,13 +49,18 @@ struct Distribution {
 pub fn print_report(path: &Path) -> Result<()> {
     let file = File::open(path)
         .with_context(|| format!("failed to open dataset events at {}", path.display()))?;
-    let report = DatasetReport::from_reader(BufReader::new(file))?;
+    let dataset_root = path.parent().unwrap_or_else(|| Path::new("."));
+    let labels = LabelStore::open(dataset_root)?.latest()?;
+    let report = DatasetReport::from_reader_with_labels(BufReader::new(file), &labels)?;
     println!("Dataset: {}\n{report}", path.display());
     Ok(())
 }
 
 impl DatasetReport {
-    fn from_reader(reader: impl BufRead) -> Result<Self> {
+    fn from_reader_with_labels(
+        reader: impl BufRead,
+        labels: &BTreeMap<String, DatasetLabel>,
+    ) -> Result<Self> {
         let mut records = Vec::new();
 
         for (index, line) in reader.lines().enumerate() {
@@ -65,10 +75,10 @@ impl DatasetReport {
             records.push(record);
         }
 
-        Ok(Self::from_records(&records))
+        Ok(Self::from_records(&records, labels))
     }
 
-    fn from_records(records: &[DatasetRecord]) -> Self {
+    fn from_records(records: &[DatasetRecord], labels: &BTreeMap<String, DatasetLabel>) -> Self {
         let mut execution_statuses = BTreeMap::new();
         let mut intents = BTreeMap::new();
         let mut current_intents = BTreeMap::new();
@@ -81,8 +91,32 @@ impl DatasetReport {
         let mut replayed_transcripts = 0;
         let mut changed_predictions = 0;
         let mut resolved_unknowns = 0;
+        let mut labeled_events = 0;
+        let mut labeled_speech = 0;
+        let mut labeled_non_speech = 0;
+        let mut transcript_corrections = 0;
+        let mut correct_intents = 0;
 
         for record in records {
+            if let Some(label) = labels.get(&record.id) {
+                labeled_events += 1;
+                if label.actual_speech {
+                    labeled_speech += 1;
+                } else {
+                    labeled_non_speech += 1;
+                }
+                if label.corrected_transcript.as_deref() != record.transcript.as_deref() {
+                    transcript_corrections += 1;
+                }
+                let predicted_intent = record
+                    .prediction
+                    .as_ref()
+                    .map_or("unknown", |prediction| prediction.intent.as_str());
+                if label.correct_intent == predicted_intent {
+                    correct_intents += 1;
+                }
+            }
+
             increment(
                 &mut execution_statuses,
                 record.execution_result.status.as_str(),
@@ -155,6 +189,11 @@ impl DatasetReport {
             replayed_transcripts,
             changed_predictions,
             resolved_unknowns,
+            labeled_events,
+            labeled_speech,
+            labeled_non_speech,
+            transcript_corrections,
+            correct_intents,
             execution_statuses,
             intents,
             current_intents,
@@ -218,6 +257,27 @@ impl fmt::Display for DatasetReport {
             formatter,
             "Resolved historical unknowns: {}",
             self.resolved_unknowns
+        )?;
+        writeln!(
+            formatter,
+            "Labeled events: {} / {}",
+            self.labeled_events, self.events
+        )?;
+        writeln!(formatter, "  Actual speech: {}", self.labeled_speech)?;
+        writeln!(
+            formatter,
+            "  Actual non-speech: {}",
+            self.labeled_non_speech
+        )?;
+        writeln!(
+            formatter,
+            "  Transcript corrections: {}",
+            self.transcript_corrections
+        )?;
+        writeln!(
+            formatter,
+            "  Correct stored intents: {} / {}",
+            self.correct_intents, self.labeled_events
         )?;
         write_counts(formatter, "Execution", &self.execution_statuses)?;
         write_counts(formatter, "Stored intents", &self.intents)?;
@@ -290,6 +350,7 @@ mod tests {
             schema_version: 1,
             id: id.to_owned(),
             timestamp: "2026-09-10T00:00:00Z".to_owned(),
+            provenance: None,
             audio_path: (speech_windows >= 7).then(|| format!("utterances/{id}.wav")),
             input: InputMetadata {
                 device: "Test microphone".to_owned(),
@@ -333,7 +394,8 @@ mod tests {
             .unwrap()
             .join("\n");
 
-        let report = DatasetReport::from_reader(Cursor::new(jsonl)).unwrap();
+        let report =
+            DatasetReport::from_reader_with_labels(Cursor::new(jsonl), &BTreeMap::new()).unwrap();
 
         assert_eq!(report.events, 3);
         assert_eq!(report.audio_samples, 2);
@@ -368,7 +430,7 @@ mod tests {
         );
         historical.transcript = Some("Открою Spotify.".to_owned());
 
-        let report = DatasetReport::from_records(&[historical]);
+        let report = DatasetReport::from_records(&[historical], &BTreeMap::new());
 
         assert_eq!(report.replayed_transcripts, 1);
         assert_eq!(report.changed_predictions, 1);
@@ -378,8 +440,48 @@ mod tests {
     }
 
     #[test]
+    fn joins_human_labels_without_changing_historical_predictions() {
+        let time = record("time", ExecutionStatus::Succeeded, Some("tell_time"), 23);
+        let mut noise = record("noise", ExecutionStatus::Rejected, Some("unknown"), 10);
+        noise.transcript = Some("[музыка]".to_owned());
+        let labels = BTreeMap::from([
+            (
+                "time".to_owned(),
+                DatasetLabel::new(
+                    "time".to_owned(),
+                    true,
+                    Some("example".to_owned()),
+                    "tell_time".to_owned(),
+                    None,
+                ),
+            ),
+            (
+                "noise".to_owned(),
+                DatasetLabel::new(
+                    "noise".to_owned(),
+                    false,
+                    None,
+                    "no_speech".to_owned(),
+                    Some("table knock".to_owned()),
+                ),
+            ),
+        ]);
+
+        let report = DatasetReport::from_records(&[time, noise], &labels);
+
+        assert_eq!(report.labeled_events, 2);
+        assert_eq!(report.labeled_speech, 1);
+        assert_eq!(report.labeled_non_speech, 1);
+        assert_eq!(report.transcript_corrections, 1);
+        assert_eq!(report.correct_intents, 1);
+        assert_eq!(report.intents["unknown"], 1);
+    }
+
+    #[test]
     fn reports_invalid_line_number() {
-        let error = DatasetReport::from_reader(Cursor::new("{}\nnot-json\n")).unwrap_err();
+        let error =
+            DatasetReport::from_reader_with_labels(Cursor::new("{}\nnot-json\n"), &BTreeMap::new())
+                .unwrap_err();
 
         assert!(error.to_string().contains("JSONL line 1"));
     }

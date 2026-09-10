@@ -129,9 +129,10 @@ Detected utterances are stored locally and excluded from Git:
 
 ```text
 data/
-├── utterances/
-│   └── <unique-id>.wav
-└── events.jsonl
+├── events.jsonl
+├── labels.jsonl
+└── utterances/
+    └── <unique-id>.wav
 ```
 
 Each line in `events.jsonl` is an independent JSON record containing:
@@ -142,8 +143,24 @@ Each line in `events.jsonl` is an independent JSON record containing:
 - predicted intent and extracted slots;
 - action status, response, or error;
 - aggregate VAD telemetry;
-- reserved `ground_truth` fields for a corrected transcript, correct intent, whether speech was
-  actually present, and free-form notes.
+- legacy `ground_truth` fields when reading schema-version 1 events.
+
+New schema-version 2 events also include the Jarvis version, process session ID, Whisper model,
+parser version, and the VAD configuration used for that prediction. Actual noise floor and adaptive
+thresholds remain in per-event VAD telemetry. Older schema-version 1 records remain readable.
+
+Raw events are never rewritten. Human ground truth is appended separately to `labels.jsonl` and
+linked to its source event by ID; if an event is labeled again, the latest label wins.
+
+Start or resume interactive review with:
+
+```bash
+cargo run --release -- --dataset-review
+```
+
+Press Enter to label the current event, `p` to play its WAV on macOS, `s` to skip it, or `q` to
+quit. Empty answers accept the transcript and intent as shown, so only mistakes need typing. A later
+run automatically starts with events that do not yet have a label.
 
 The audio uses the microphone's native sample rate and channel count. This preserves more source
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
@@ -164,9 +181,11 @@ cargo run --release -- --dataset-report /path/to/events.jsonl
 
 The report includes execution and intent counts, rejected short candidates, Whisper non-speech
 annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
-speech-window count, and noise floor. It also replays saved transcripts through the current parser
-and reports changed predictions without modifying the historical JSONL records. This makes parser
-improvements visible as transitions such as `unknown -> play_music`.
+speech-window count, and noise floor. When labels exist beside the event file, it also reports
+review progress, actual speech/non-speech counts, transcript corrections, and stored-intent
+accuracy. It replays saved transcripts through the current parser and reports changed predictions
+without modifying the historical JSONL records. This makes parser improvements visible as
+transitions such as `unknown -> play_music`.
 
 For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
 

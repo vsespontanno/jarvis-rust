@@ -4,6 +4,11 @@ All notable changes to Jarvis are documented in this file. The project follows S
 and uses Changie to collect unreleased change fragments.
 
 
+## 0.4.0 - 2026-09-10
+### Added
+- Dataset events include versioned runtime provenance for reproducible speech and VAD experiments.
+- Interactive dataset review appends resumable human ground-truth labels without rewriting historical events.
+
 ## 0.3.0 - 2026-09-10
 ### Added
 - Dataset reports can replay saved transcripts through the current parser and summarize changed intent predictions.

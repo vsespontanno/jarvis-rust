@@ -1,5 +1,7 @@
 use crate::command::Command;
 
+pub const VERSION: u32 = 1;
+
 pub fn parse(text: &str) -> Command {
     let words = normalized_words(text);
 

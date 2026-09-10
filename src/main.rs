@@ -33,6 +33,7 @@ const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
+const DATASET_REVIEW_FLAG: &str = "--dataset-review";
 
 struct CapturedUtterance {
     recording: audio::Recording,
@@ -48,6 +49,13 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| PathBuf::from(DATASET_PATH).join("events.jsonl"));
         return dataset::print_report(&events_path);
     }
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_REVIEW_FLAG)) {
+        let dataset_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DATASET_PATH));
+        return dataset::review(&dataset_path);
+    }
 
     init_logging();
     let running = install_shutdown_handler()?;
@@ -60,13 +68,32 @@ fn main() -> Result<()> {
     let transcriber = stt::WhisperTranscriber::load(&model_path)
         .context("failed to load the speech recognition model")?;
     println!("Whisper model is ready.");
-    let dataset = dataset::DatasetStore::open(DATASET_PATH)
+    let vad_config = vad_config();
+    let provenance = dataset::Provenance {
+        jarvis_version: env!("CARGO_PKG_VERSION").to_owned(),
+        session_id: dataset::Provenance::new_session_id(),
+        whisper_model: model_path.display().to_string(),
+        parser_version: parser::VERSION,
+        vad_config: dataset::VadConfigMetadata {
+            level_window_ms: LEVEL_WINDOW.as_millis() as u64,
+            calibration_ms: CALIBRATION_DURATION.as_millis() as u64,
+            speech_start_ms: SPEECH_START_DURATION.as_millis() as u64,
+            speech_end_ms: SPEECH_END_DURATION.as_millis() as u64,
+            min_speech_duration_ms: MINIMUM_SPEECH_DURATION.as_millis() as u64,
+            pre_roll_ms: PRE_ROLL_DURATION.as_millis() as u64,
+            start_margin_db: vad_config.start_margin_db,
+            end_margin_db: vad_config.end_margin_db,
+            minimum_start_level_dbfs: vad_config.minimum_start_level_dbfs,
+            minimum_end_level_dbfs: vad_config.minimum_end_level_dbfs,
+        },
+    };
+    let dataset = dataset::DatasetStore::open(DATASET_PATH, provenance)
         .context("failed to initialize the local dataset")?;
     let expected_capture_duration =
         CALIBRATION_DURATION + MAX_WAIT_FOR_SPEECH + MAX_SPEECH_DURATION;
     let audio_input = audio::RecordingSession::start(expected_capture_duration, LEVEL_WINDOW)
         .context("failed to open the default microphone")?;
-    let mut detector = vad::VadDetector::new(vad_config());
+    let mut detector = vad::VadDetector::new(vad_config);
     let (timers, timer_events) = actions::timer_channel();
     println!("Jarvis is running. Press Ctrl+C to stop.");
 
@@ -114,7 +141,7 @@ fn process_command(
     };
 
     let sample = dataset.new_sample();
-    let mut record = dataset::DatasetRecord::new(&sample, &captured.recording);
+    let mut record = dataset.new_record(&sample, &captured.recording);
     record.vad = Some(captured.vad);
 
     if !has_minimum_speech(record.vad.as_ref().expect("VAD telemetry is set")) {
