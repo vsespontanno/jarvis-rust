@@ -1,6 +1,6 @@
 use crate::command::Command;
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub fn parse(text: &str) -> Command {
     let words = normalized_words(text);
@@ -28,17 +28,19 @@ fn timer_duration_seconds(words: &[String]) -> Option<u64> {
             .iter()
             .any(|word| expected.iter().any(|expected| word == expected))
     };
-    let set_actions = ["поставь", "поставьте", "поставить"];
+    let set_actions = ["поставь", "поставьте", "поставить", "поставим", "поставив"];
     let has_action = contains_any(&[
         "поставь",
         "поставьте",
         "поставить",
+        "поставим",
+        "поставив",
         "запусти",
         "запустить",
         "включи",
         "включить",
     ]);
-    let has_timer = contains_any(&["таймер", "таймера", "тайга"]);
+    let has_timer = contains_any(&["таймер", "таймера", "тайга", "timer"]);
     let has_implicit_timer = words
         .windows(2)
         .any(|pair| set_actions.contains(&pair[0].as_str()) && pair[1] == "на");
@@ -206,6 +208,9 @@ mod tests {
             ("поставь таймер на 30 секунд", 30),
             ("поставьте на одну минуту", 60),
             ("поставь тайга на 1 минуту", 60),
+            ("поставь timer на 5 секунд", 5),
+            ("Поставим на 30 секунд", 30),
+            ("Поставив таймер на 5 секунд", 5),
             ("поставь таймер на пять минут", 300),
             ("запусти таймер на двадцать пять минут", 1_500),
             ("включи таймер на 1 час 30 минут", 5_400),

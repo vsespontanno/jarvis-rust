@@ -99,7 +99,8 @@ Ask for the current local time using phrases such as:
 
 Music commands open the installed Spotify application using the standard macOS application
 launcher. The parser also accepts observed Whisper substitutions such as `открою Spotify` and
-`спотик`.
+`спотик`. Timer parsing accepts the observed code-switch `timer` and the verb forms `поставим` and
+`поставив` when a valid duration follows.
 
 If the entire Whisper transcript is formatted as a sound annotation in square brackets,
 parentheses, or asterisks—for example `[музыка]`, `(звук от джанра)`, or `*хм*`—Jarvis records it as

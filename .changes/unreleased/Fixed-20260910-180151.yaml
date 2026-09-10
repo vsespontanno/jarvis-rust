@@ -1,0 +1,3 @@
+kind: Fixed
+body: Timer intent parsing recognizes code-switched timer text and verb forms observed in the labeled dataset.
+time: 2026-09-10T18:01:51.799288+03:00
