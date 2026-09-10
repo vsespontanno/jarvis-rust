@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::audio::Recording;
 
+mod analysis;
 mod report;
 mod review;
 

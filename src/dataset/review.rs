@@ -36,6 +36,8 @@ fn review_with(
     }
 
     let mut lines = input.lines();
+    let mut saved = 0;
+    let mut skipped = 0;
     'events: for (index, event) in pending.iter().enumerate() {
         show_event(&mut output, index + 1, pending.len(), event)?;
 
@@ -46,7 +48,7 @@ fn review_with(
                 "Action [Enter=label, p=play, s=skip, q=quit]: ",
             )?
             else {
-                return Ok(());
+                return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
             };
             match action.to_lowercase().as_str() {
                 "" => break,
@@ -58,8 +60,18 @@ fn review_with(
                     }
                     None => writeln!(output, "Audio was not saved for this event.")?,
                 },
-                "s" => continue 'events,
-                "q" => return Ok(()),
+                "s" => {
+                    skipped += 1;
+                    continue 'events;
+                }
+                "q" => {
+                    return write_review_summary(
+                        &mut output,
+                        saved,
+                        skipped,
+                        pending.len() - saved,
+                    );
+                }
                 _ => writeln!(output, "Use Enter, p, s, or q.")?,
             }
         }
@@ -71,24 +83,24 @@ fn review_with(
                 .is_some_and(|prediction| prediction.intent != "no_speech");
         let Some(actual_speech) = prompt_bool(&mut output, &mut lines, "Speech?", default_speech)?
         else {
-            return Ok(());
+            return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
         };
 
         let (corrected_transcript, correct_intent) = if actual_speech {
             let transcript = event.transcript.as_deref().unwrap_or("");
             let Some(corrected) =
-                prompt_default(&mut output, &mut lines, "Correct transcript?", transcript)?
+                prompt_default(&mut output, &mut lines, "Corrected transcript", transcript)?
             else {
-                return Ok(());
+                return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
             };
             let predicted_intent = event
                 .prediction
                 .as_ref()
                 .map_or("unknown", |prediction| prediction.intent.as_str());
             let Some(intent) =
-                prompt_default(&mut output, &mut lines, "Correct intent?", predicted_intent)?
+                prompt_default(&mut output, &mut lines, "Correct intent", predicted_intent)?
             else {
-                return Ok(());
+                return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
             };
             (Some(corrected), intent)
         } else {
@@ -96,7 +108,7 @@ fn review_with(
         };
 
         let Some(notes) = prompt(&mut output, &mut lines, "Notes? [Enter=none]: ")? else {
-            return Ok(());
+            return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
         };
         let notes = (!notes.is_empty()).then_some(notes);
         labels.append(&DatasetLabel::new(
@@ -106,10 +118,23 @@ fn review_with(
             correct_intent,
             notes,
         ))?;
+        saved += 1;
         writeln!(output, "Label saved.\n")?;
     }
 
-    writeln!(output, "All pending events reviewed.")?;
+    write_review_summary(&mut output, saved, skipped, pending.len() - saved)
+}
+
+fn write_review_summary(
+    mut output: impl Write,
+    saved: usize,
+    skipped: usize,
+    remaining: usize,
+) -> Result<()> {
+    writeln!(output, "Review summary:")?;
+    writeln!(output, "  Labels saved this run: {saved}")?;
+    writeln!(output, "  Skipped this run: {skipped}")?;
+    writeln!(output, "  Remaining unlabeled: {remaining}")?;
     Ok(())
 }
 
@@ -203,7 +228,7 @@ fn prompt_default(
     message: &str,
     default: &str,
 ) -> Result<Option<String>> {
-    prompt(output, lines, &format!("{message} [Enter=same]: ")).map(|answer| {
+    prompt(output, lines, &format!("{message} [Enter=keep current]: ")).map(|answer| {
         answer.map(|answer| {
             if answer.is_empty() {
                 default.to_owned()
@@ -326,6 +351,8 @@ mod tests {
         assert!(output.contains("[1/1]"));
         assert!(output.contains("second"));
         assert!(!output.contains("first"));
+        assert!(output.contains("Labels saved this run: 0"));
+        assert!(output.contains("Remaining unlabeled: 1"));
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -347,6 +374,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(played, vec![root.join("utterances/first.wav")]);
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Skipped this run: 1"));
+        assert!(output.contains("Remaining unlabeled: 2"));
         assert!(
             LabelStore::open(&root)
                 .unwrap()

@@ -8,10 +8,13 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use super::{DatasetLabel, DatasetRecord, LabelStore};
+use super::{
+    DatasetLabel, DatasetRecord, LabelStore,
+    analysis::{DatasetAnalysis, NumericStatistics, ParserEvaluation, VadStatistics, analyze},
+};
 use crate::parser;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 struct DatasetReport {
     events: usize,
     audio_samples: usize,
@@ -22,11 +25,7 @@ struct DatasetReport {
     replayed_transcripts: usize,
     changed_predictions: usize,
     resolved_unknowns: usize,
-    labeled_events: usize,
-    labeled_speech: usize,
-    labeled_non_speech: usize,
-    transcript_corrections: usize,
-    correct_intents: usize,
+    analysis: DatasetAnalysis,
     execution_statuses: BTreeMap<String, usize>,
     intents: BTreeMap<String, usize>,
     current_intents: BTreeMap<String, usize>,
@@ -91,32 +90,8 @@ impl DatasetReport {
         let mut replayed_transcripts = 0;
         let mut changed_predictions = 0;
         let mut resolved_unknowns = 0;
-        let mut labeled_events = 0;
-        let mut labeled_speech = 0;
-        let mut labeled_non_speech = 0;
-        let mut transcript_corrections = 0;
-        let mut correct_intents = 0;
 
         for record in records {
-            if let Some(label) = labels.get(&record.id) {
-                labeled_events += 1;
-                if label.actual_speech {
-                    labeled_speech += 1;
-                } else {
-                    labeled_non_speech += 1;
-                }
-                if label.corrected_transcript.as_deref() != record.transcript.as_deref() {
-                    transcript_corrections += 1;
-                }
-                let predicted_intent = record
-                    .prediction
-                    .as_ref()
-                    .map_or("unknown", |prediction| prediction.intent.as_str());
-                if label.correct_intent == predicted_intent {
-                    correct_intents += 1;
-                }
-            }
-
             increment(
                 &mut execution_statuses,
                 record.execution_result.status.as_str(),
@@ -189,11 +164,7 @@ impl DatasetReport {
             replayed_transcripts,
             changed_predictions,
             resolved_unknowns,
-            labeled_events,
-            labeled_speech,
-            labeled_non_speech,
-            transcript_corrections,
-            correct_intents,
+            analysis: analyze(records, labels),
             execution_statuses,
             intents,
             current_intents,
@@ -258,27 +229,7 @@ impl fmt::Display for DatasetReport {
             "Resolved historical unknowns: {}",
             self.resolved_unknowns
         )?;
-        writeln!(
-            formatter,
-            "Labeled events: {} / {}",
-            self.labeled_events, self.events
-        )?;
-        writeln!(formatter, "  Actual speech: {}", self.labeled_speech)?;
-        writeln!(
-            formatter,
-            "  Actual non-speech: {}",
-            self.labeled_non_speech
-        )?;
-        writeln!(
-            formatter,
-            "  Transcript corrections: {}",
-            self.transcript_corrections
-        )?;
-        writeln!(
-            formatter,
-            "  Correct stored intents: {} / {}",
-            self.correct_intents, self.labeled_events
-        )?;
+        write_pipeline_analysis(formatter, &self.analysis, self.events)?;
         write_counts(formatter, "Execution", &self.execution_statuses)?;
         write_counts(formatter, "Stored intents", &self.intents)?;
         write_counts(formatter, "Current parser intents", &self.current_intents)?;
@@ -291,6 +242,234 @@ impl fmt::Display for DatasetReport {
         write_distribution(formatter, "speech windows", self.speech_windows, "")?;
         write_distribution(formatter, "noise floor", self.noise_floor_dbfs, "dBFS")
     }
+}
+
+fn write_pipeline_analysis(
+    formatter: &mut fmt::Formatter<'_>,
+    analysis: &DatasetAnalysis,
+    events: usize,
+) -> fmt::Result {
+    let detection = &analysis.detection;
+    writeln!(
+        formatter,
+        "\nLabeled pipeline evaluation: {} / {events}",
+        analysis.labeled
+    )?;
+    writeln!(formatter, "\nSpeech detection:")?;
+    writeln!(formatter, "  Actual speech: {}", detection.actual_speech)?;
+    writeln!(
+        formatter,
+        "  Actual non-speech / false activations: {}",
+        detection.actual_non_speech
+    )?;
+    writeln!(
+        formatter,
+        "  Non-speech rejected before Whisper: {}",
+        detection.non_speech_rejected_before_stt
+    )?;
+    writeln!(
+        formatter,
+        "  Non-speech that reached Whisper: {}",
+        detection.non_speech_reached_stt
+    )?;
+    writeln!(
+        formatter,
+        "  Non-speech with non-empty Whisper text: {}",
+        detection.non_speech_with_text
+    )?;
+    writeln!(
+        formatter,
+        "  Non-speech recognized as sound annotations: {}",
+        detection.non_speech_annotations
+    )?;
+
+    let stt = &analysis.stt;
+    writeln!(formatter, "\nWhisper (actual speech only):")?;
+    writeln!(formatter, "  Speech samples: {}", stt.speech_samples)?;
+    writeln!(formatter, "  Samples evaluated: {}", stt.evaluated_samples)?;
+    writeln!(
+        formatter,
+        "  Samples with word errors: {}",
+        stt.samples_with_errors
+    )?;
+    writeln!(
+        formatter,
+        "  Word errors (substitutions / deletions / insertions): {} / {} / {}",
+        stt.substitutions, stt.deletions, stt.insertions
+    )?;
+    write_rate(formatter, "Aggregate WER", stt.aggregate_wer)?;
+    write_rate(formatter, "Mean per-sample WER", stt.mean_sample_wer)?;
+    write_rate(formatter, "Median per-sample WER", stt.median_sample_wer)?;
+
+    write_parser_evaluation(formatter, "Historical parser", &analysis.historical_parser)?;
+    write_parser_evaluation(formatter, "Current parser", &analysis.current_parser)?;
+
+    write_vad_statistics(
+        formatter,
+        "VAD telemetry — actual speech",
+        &analysis.speech_vad,
+    )?;
+    write_vad_statistics(
+        formatter,
+        "VAD telemetry — actual non-speech",
+        &analysis.non_speech_vad,
+    )?;
+
+    writeln!(formatter, "\nMinimum speech duration simulation:")?;
+    writeln!(
+        formatter,
+        "  mark threshold  speech kept/rejected  noise kept/rejected  recall  noise rejection"
+    )?;
+    for row in &analysis.thresholds {
+        let highlighted = matches!(row.threshold_ms, 100 | 140 | 200 | 300);
+        let candidate = analysis.candidate_thresholds.contains(&row.threshold_ms);
+        let mark = match (highlighted, candidate) {
+            (true, true) => "*!",
+            (true, false) => "* ",
+            (false, true) => " !",
+            (false, false) => "  ",
+        };
+        writeln!(
+            formatter,
+            "  {mark} {:>3} ms      {:>3}/{:<3}             {:>3}/{:<3}          {:>6}  {:>6}",
+            row.threshold_ms,
+            row.speech_kept,
+            row.speech_rejected,
+            row.non_speech_kept,
+            row.non_speech_rejected,
+            format_rate(row.speech_recall),
+            format_rate(row.noise_rejection_rate),
+        )?;
+    }
+    writeln!(
+        formatter,
+        "  * requested checkpoint; ! data-based candidate"
+    )?;
+    if analysis.candidate_thresholds.is_empty() {
+        writeln!(formatter, "  Candidates: no labeled VAD data")
+    } else {
+        let candidates = analysis
+            .candidate_thresholds
+            .iter()
+            .map(|threshold| format!("{threshold} ms"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            formatter,
+            "  Candidates: {candidates} (configuration unchanged)"
+        )
+    }
+}
+
+fn write_parser_evaluation(
+    formatter: &mut fmt::Formatter<'_>,
+    heading: &str,
+    evaluation: &ParserEvaluation,
+) -> fmt::Result {
+    writeln!(formatter, "\n{heading} (supported labeled commands only):")?;
+    writeln!(
+        formatter,
+        "  Correct: {} / {} ({})",
+        evaluation.correct,
+        evaluation.total,
+        format_rate(evaluation.accuracy())
+    )?;
+    writeln!(formatter, "  Confusion (expected -> predicted):")?;
+    if evaluation.confusion.is_empty() {
+        writeln!(formatter, "    (no data)")?;
+    } else {
+        for (expected, predictions) in &evaluation.confusion {
+            for (predicted, count) in predictions {
+                writeln!(formatter, "    {expected} -> {predicted}: {count}")?;
+            }
+        }
+    }
+    writeln!(formatter, "  Errors:")?;
+    if evaluation.mistakes.is_empty() {
+        writeln!(formatter, "    (none)")?;
+    } else {
+        for mistake in &evaluation.mistakes {
+            writeln!(
+                formatter,
+                "    {}: {} -> {} | \"{}\"",
+                mistake.event_id, mistake.expected, mistake.predicted, mistake.transcript
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_vad_statistics(
+    formatter: &mut fmt::Formatter<'_>,
+    heading: &str,
+    statistics: &VadStatistics,
+) -> fmt::Result {
+    writeln!(
+        formatter,
+        "\n{heading} (count / min / median / mean / max):"
+    )?;
+    write_numeric_statistics(formatter, "duration", statistics.duration_ms, "ms")?;
+    write_numeric_statistics(formatter, "speech windows", statistics.speech_windows, "")?;
+    write_numeric_statistics(formatter, "peak", statistics.peak_dbfs, "dBFS")?;
+    write_numeric_statistics(
+        formatter,
+        "mean speech level",
+        statistics.mean_speech_dbfs,
+        "dBFS",
+    )?;
+    write_numeric_statistics(
+        formatter,
+        "median speech level",
+        statistics.median_speech_dbfs,
+        "dBFS",
+    )?;
+    write_numeric_statistics(
+        formatter,
+        "noise floor",
+        statistics.noise_floor_dbfs,
+        "dBFS",
+    )?;
+    write_numeric_statistics(
+        formatter,
+        "start threshold",
+        statistics.start_threshold_dbfs,
+        "dBFS",
+    )?;
+    write_numeric_statistics(
+        formatter,
+        "end threshold",
+        statistics.end_threshold_dbfs,
+        "dBFS",
+    )
+}
+
+fn write_numeric_statistics(
+    formatter: &mut fmt::Formatter<'_>,
+    name: &str,
+    statistics: Option<NumericStatistics>,
+    unit: &str,
+) -> fmt::Result {
+    let Some(statistics) = statistics else {
+        return writeln!(formatter, "  {name}: no data");
+    };
+    let separator = if unit.is_empty() { "" } else { " " };
+    writeln!(
+        formatter,
+        "  {name}: {} / {:.1}{separator}{unit} / {:.1}{separator}{unit} / {:.1}{separator}{unit} / {:.1}{separator}{unit}",
+        statistics.count,
+        statistics.minimum,
+        statistics.median,
+        statistics.mean,
+        statistics.maximum,
+    )
+}
+
+fn write_rate(formatter: &mut fmt::Formatter<'_>, name: &str, rate: Option<f64>) -> fmt::Result {
+    writeln!(formatter, "  {name}: {}", format_rate(rate))
+}
+
+fn format_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(|| "n/a".to_owned(), |rate| format!("{:.1}%", rate * 100.0))
 }
 
 fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
@@ -469,11 +648,11 @@ mod tests {
 
         let report = DatasetReport::from_records(&[time, noise], &labels);
 
-        assert_eq!(report.labeled_events, 2);
-        assert_eq!(report.labeled_speech, 1);
-        assert_eq!(report.labeled_non_speech, 1);
-        assert_eq!(report.transcript_corrections, 1);
-        assert_eq!(report.correct_intents, 1);
+        assert_eq!(report.analysis.labeled, 2);
+        assert_eq!(report.analysis.detection.actual_speech, 1);
+        assert_eq!(report.analysis.detection.actual_non_speech, 1);
+        assert_eq!(report.analysis.detection.non_speech_reached_stt, 1);
+        assert_eq!(report.analysis.historical_parser.correct, 1);
         assert_eq!(report.intents["unknown"], 1);
     }
 

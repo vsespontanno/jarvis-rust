@@ -159,7 +159,8 @@ cargo run --release -- --dataset-review
 ```
 
 Press Enter to label the current event, `p` to play its WAV on macOS, `s` to skip it, or `q` to
-quit. Empty answers accept the transcript and intent as shown, so only mistakes need typing. A later
+quit. Editable prompts explicitly say that Enter keeps the current value, so only mistakes need
+typing. On exit, review reports how many labels were saved, skipped, and remain unfinished. A later
 run automatically starts with events that do not yet have a label.
 
 The audio uses the microphone's native sample rate and channel count. This preserves more source
@@ -179,13 +180,40 @@ Pass a different JSON Lines file after the flag when needed:
 cargo run --release -- --dataset-report /path/to/events.jsonl
 ```
 
-The report includes execution and intent counts, rejected short candidates, Whisper non-speech
-annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
-speech-window count, and noise floor. When labels exist beside the event file, it also reports
-review progress, actual speech/non-speech counts, transcript corrections, and stored-intent
-accuracy. It replays saved transcripts through the current parser and reports changed predictions
-without modifying the historical JSONL records. This makes parser improvements visible as
-transitions such as `unknown -> play_music`.
+When labels exist beside the event file, the report evaluates each pipeline level separately:
+
+- speech detection: real speech, false activations, early rejections, and non-speech sent to
+  Whisper;
+- Whisper: normalized word errors on real speech only;
+- parser: historical and current accuracy, errors, and intent confusion on supported commands;
+- VAD: separate count/min/median/mean/max telemetry for speech and non-speech;
+- minimum speech duration: an offline threshold sweep from 40 through 500 ms showing speech recall
+  and noise rejection.
+
+Historical predictions remain unchanged. The current parser is replayed against the transcript
+saved at capture time, and threshold candidates are recommendations only: the live VAD setting is
+never changed by the report. Schema-version 1 events use the historical 20 ms window size when
+simulating speech duration.
+
+Before comparing transcripts, the report lowercases text, removes punctuation, and collapses
+whitespace. Word Error Rate is then calculated as
+
+$$
+WER=\frac{S+D+I}{N},
+$$
+
+where $S$ is substituted words, $D$ is deleted words, $I$ is inserted words, and $N$ is the number
+of words in the manually corrected transcript. Speech recall and noise rejection for a simulated
+threshold are
+
+$$
+R_{speech}=\frac{speech\ kept}{speech\ kept+speech\ rejected},
+\qquad
+R_{noise}=\frac{noise\ rejected}{noise\ kept+noise\ rejected}.
+$$
+
+These are offline calculations over labeled detections, not a measurement of all the silence that
+never activated Jarvis.
 
 For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
 
