@@ -33,10 +33,23 @@ const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
+const DATASET_REVIEW_FLAG: &str = "--dataset-review";
+const DATASET_COLLECT_FLAG: &str = "--dataset-collect";
+const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-prompts.json";
 
 struct CapturedUtterance {
     recording: audio::Recording,
     vad: dataset::VadTelemetry,
+}
+
+#[derive(Clone, Copy)]
+enum ProcessingMode<'a> {
+    Natural,
+    Prompted {
+        campaign: &'a str,
+        prompt: &'a dataset::CollectionPrompt,
+        labels: &'a dataset::LabelStore,
+    },
 }
 
 fn main() -> Result<()> {
@@ -48,26 +61,84 @@ fn main() -> Result<()> {
             .unwrap_or_else(|| PathBuf::from(DATASET_PATH).join("events.jsonl"));
         return dataset::print_report(&events_path);
     }
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_REVIEW_FLAG)) {
+        let dataset_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DATASET_PATH));
+        return dataset::review(&dataset_path);
+    }
+
+    let collection_plan_path =
+        (first_argument.as_deref() == Some(OsStr::new(DATASET_COLLECT_FLAG))).then(|| {
+            env::args_os()
+                .nth(2)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_COLLECTION_PLAN_PATH))
+        });
+    let collection_plan = collection_plan_path
+        .as_deref()
+        .map(dataset::CollectionPlan::load)
+        .transpose()?;
 
     init_logging();
     let running = install_shutdown_handler()?;
 
-    let model_path = first_argument
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH));
+    let model_path = if collection_plan_path.is_some() {
+        PathBuf::from(DEFAULT_MODEL_PATH)
+    } else {
+        first_argument
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL_PATH))
+    };
 
     println!("Loading Whisper model from {}...", model_path.display());
     let transcriber = stt::WhisperTranscriber::load(&model_path)
         .context("failed to load the speech recognition model")?;
     println!("Whisper model is ready.");
-    let dataset = dataset::DatasetStore::open(DATASET_PATH)
+    let vad_config = vad_config();
+    let provenance = dataset::Provenance {
+        jarvis_version: env!("CARGO_PKG_VERSION").to_owned(),
+        session_id: dataset::Provenance::new_session_id(),
+        whisper_model: model_path.display().to_string(),
+        parser_version: parser::VERSION,
+        vad_config: dataset::VadConfigMetadata {
+            level_window_ms: LEVEL_WINDOW.as_millis() as u64,
+            calibration_ms: CALIBRATION_DURATION.as_millis() as u64,
+            speech_start_ms: SPEECH_START_DURATION.as_millis() as u64,
+            speech_end_ms: SPEECH_END_DURATION.as_millis() as u64,
+            min_speech_duration_ms: MINIMUM_SPEECH_DURATION.as_millis() as u64,
+            pre_roll_ms: PRE_ROLL_DURATION.as_millis() as u64,
+            start_margin_db: vad_config.start_margin_db,
+            end_margin_db: vad_config.end_margin_db,
+            minimum_start_level_dbfs: vad_config.minimum_start_level_dbfs,
+            minimum_end_level_dbfs: vad_config.minimum_end_level_dbfs,
+        },
+    };
+    let dataset = dataset::DatasetStore::open(DATASET_PATH, provenance)
         .context("failed to initialize the local dataset")?;
     let expected_capture_duration =
         CALIBRATION_DURATION + MAX_WAIT_FOR_SPEECH + MAX_SPEECH_DURATION;
     let audio_input = audio::RecordingSession::start(expected_capture_duration, LEVEL_WINDOW)
         .context("failed to open the default microphone")?;
-    let mut detector = vad::VadDetector::new(vad_config());
+    let mut detector = vad::VadDetector::new(vad_config);
     let (timers, timer_events) = actions::timer_channel();
+
+    if let Some(plan) = collection_plan {
+        let labels = dataset::LabelStore::open(PathBuf::from(DATASET_PATH).as_path())?;
+        return run_collection(
+            &plan,
+            &transcriber,
+            &dataset,
+            &labels,
+            &audio_input,
+            &mut detector,
+            &timers,
+            &timer_events,
+            &running,
+        );
+    }
+
     println!("Jarvis is running. Press Ctrl+C to stop.");
 
     while running.load(Ordering::Relaxed) {
@@ -79,6 +150,7 @@ fn main() -> Result<()> {
             &timers,
             &timer_events,
             &running,
+            ProcessingMode::Natural,
         ) && running.load(Ordering::Relaxed)
         {
             eprintln!("\nCould not process this command: {error:#}");
@@ -98,6 +170,7 @@ fn install_shutdown_handler() -> Result<Arc<AtomicBool>> {
     Ok(running)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_command(
     transcriber: &stt::WhisperTranscriber,
     dataset: &dataset::DatasetStore,
@@ -106,16 +179,29 @@ fn process_command(
     timers: &actions::TimerScheduler,
     timer_events: &Receiver<actions::TimerElapsed>,
     running: &AtomicBool,
-) -> Result<()> {
+    mode: ProcessingMode<'_>,
+) -> Result<bool> {
     let Some(captured) = record_utterance(audio_input, detector, timer_events, running)
         .context("failed to capture a speech utterance")?
     else {
-        return Ok(());
+        return Ok(false);
     };
 
     let sample = dataset.new_sample();
-    let mut record = dataset::DatasetRecord::new(&sample, &captured.recording);
+    let mut record = dataset.new_record(&sample, &captured.recording);
     record.vad = Some(captured.vad);
+    if let ProcessingMode::Prompted {
+        campaign, prompt, ..
+    } = mode
+    {
+        record.collection = Some(dataset::CollectionMetadata {
+            source: dataset::CollectionSource::Prompted,
+            campaign: campaign.to_owned(),
+            prompt_id: prompt.id.clone(),
+            expected_transcript: prompt.transcript.clone(),
+            expected_intent: prompt.intent.clone(),
+        });
+    }
 
     if !has_minimum_speech(record.vad.as_ref().expect("VAD telemetry is set")) {
         let speech_duration_ms = record
@@ -137,7 +223,8 @@ fn process_command(
         dataset
             .append(&record)
             .context("failed to append the rejected detection event")?;
-        return Ok(());
+        append_prompt_label(mode, &record.id)?;
+        return Ok(true);
     }
 
     let result = process_recording(
@@ -147,6 +234,7 @@ fn process_command(
         &captured.recording,
         &mut record,
         timers,
+        matches!(mode, ProcessingMode::Natural),
     );
     if let Err(error) = &result {
         record.processing_error = Some(format!("{error:#}"));
@@ -154,8 +242,9 @@ fn process_command(
     dataset
         .append(&record)
         .context("failed to append the dataset event")?;
+    append_prompt_label(mode, &record.id)?;
 
-    result
+    result.map(|_| true)
 }
 
 fn process_recording(
@@ -165,6 +254,7 @@ fn process_recording(
     recording: &audio::Recording,
     record: &mut dataset::DatasetRecord,
     timers: &actions::TimerScheduler,
+    execute_actions: bool,
 ) -> Result<()> {
     dataset.save_audio(sample, recording)?;
 
@@ -203,6 +293,14 @@ fn process_recording(
         return Ok(());
     }
 
+    if !execute_actions {
+        println!(
+            "\nPredicted intent: {}\nCollection mode: action not executed.",
+            command.intent_name()
+        );
+        return Ok(());
+    }
+
     match actions::execute(&command, timers) {
         Ok(Some(response)) => {
             println!("\nJarvis:\n{response}");
@@ -232,6 +330,118 @@ fn process_recording(
     }
 
     Ok(())
+}
+
+fn append_prompt_label(mode: ProcessingMode<'_>, event_id: &str) -> Result<()> {
+    let ProcessingMode::Prompted { prompt, labels, .. } = mode else {
+        return Ok(());
+    };
+    labels
+        .append(&dataset::DatasetLabel::new(
+            event_id.to_owned(),
+            true,
+            Some(prompt.transcript.clone()),
+            prompt.intent.clone(),
+            None,
+        ))
+        .context("failed to append the prompted ground-truth label")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_collection(
+    plan: &dataset::CollectionPlan,
+    transcriber: &stt::WhisperTranscriber,
+    dataset: &dataset::DatasetStore,
+    labels: &dataset::LabelStore,
+    audio_input: &audio::RecordingSession,
+    detector: &mut vad::VadDetector,
+    timers: &actions::TimerScheduler,
+    timer_events: &Receiver<actions::TimerElapsed>,
+    running: &AtomicBool,
+) -> Result<()> {
+    println!(
+        "Controlled dataset collection: {} ({} prompts).",
+        plan.campaign,
+        plan.prompts.len()
+    );
+    println!("Voice actions are disabled. Press Ctrl+C to stop.\n");
+
+    let mut collected = 0;
+    let mut skipped = 0;
+    for (index, prompt) in plan.prompts.iter().enumerate() {
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        loop {
+            println!(
+                "[{}/{}] {}\nSay: \"{}\"",
+                index + 1,
+                plan.prompts.len(),
+                prompt.intent,
+                prompt.transcript
+            );
+            print!("Press Enter when ready, s=skip, q=quit: ");
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 || answer.trim().eq_ignore_ascii_case("q") {
+                print_collection_summary(
+                    collected,
+                    skipped,
+                    plan.prompts.len() - collected - skipped,
+                );
+                return Ok(());
+            }
+            if answer.trim().eq_ignore_ascii_case("s") {
+                skipped += 1;
+                println!();
+                break;
+            }
+            if !answer.trim().is_empty() {
+                println!("Use Enter, s, or q.\n");
+                continue;
+            }
+
+            match process_command(
+                transcriber,
+                dataset,
+                audio_input,
+                detector,
+                timers,
+                timer_events,
+                running,
+                ProcessingMode::Prompted {
+                    campaign: &plan.campaign,
+                    prompt,
+                    labels,
+                },
+            ) {
+                Ok(true) => {
+                    collected += 1;
+                    println!("Prompt saved and labeled.\n");
+                    break;
+                }
+                Ok(false) if running.load(Ordering::Relaxed) => {
+                    println!("Nothing captured; retrying this prompt.\n");
+                }
+                Ok(false) => break,
+                Err(error) => {
+                    eprintln!("Could not process this prompt: {error:#}\n");
+                    break;
+                }
+            }
+        }
+    }
+
+    print_collection_summary(collected, skipped, plan.prompts.len() - collected - skipped);
+    Ok(())
+}
+
+fn print_collection_summary(collected: usize, skipped: usize, remaining: usize) {
+    println!("Collection summary:");
+    println!("  Collected: {collected}");
+    println!("  Skipped: {skipped}");
+    println!("  Remaining: {remaining}");
 }
 
 fn has_minimum_speech(telemetry: &dataset::VadTelemetry) -> bool {

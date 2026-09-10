@@ -4,6 +4,17 @@ All notable changes to Jarvis are documented in this file. The project follows S
 and uses Changie to collect unreleased change fragments.
 
 
+## 0.5.0 - 2026-09-10
+### Added
+- Dataset reports evaluate speech detection, Whisper word errors, historical and current parsers, labeled VAD distributions, and minimum-duration trade-offs.
+### Changed
+- Dataset review prompts are explicit about editable values and summarize saved, skipped, and remaining samples.
+
+## 0.4.0 - 2026-09-10
+### Added
+- Dataset events include versioned runtime provenance for reproducible speech and VAD experiments.
+- Interactive dataset review appends resumable human ground-truth labels without rewriting historical events.
+
 ## 0.3.0 - 2026-09-10
 ### Added
 - Dataset reports can replay saved transcripts through the current parser and summarize changed intent predictions.

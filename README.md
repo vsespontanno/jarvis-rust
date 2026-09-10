@@ -129,9 +129,10 @@ Detected utterances are stored locally and excluded from Git:
 
 ```text
 data/
-├── utterances/
-│   └── <unique-id>.wav
-└── events.jsonl
+├── events.jsonl
+├── labels.jsonl
+└── utterances/
+    └── <unique-id>.wav
 ```
 
 Each line in `events.jsonl` is an independent JSON record containing:
@@ -142,8 +143,39 @@ Each line in `events.jsonl` is an independent JSON record containing:
 - predicted intent and extracted slots;
 - action status, response, or error;
 - aggregate VAD telemetry;
-- reserved `ground_truth` fields for a corrected transcript, correct intent, whether speech was
-  actually present, and free-form notes.
+- legacy `ground_truth` fields when reading schema-version 1 events.
+
+Schema-version 2 events also include the Jarvis version, process session ID, Whisper model, parser
+version, and the VAD configuration used for that prediction. Schema-version 3 adds optional
+controlled-collection metadata. Actual noise floor and adaptive thresholds remain in per-event VAD
+telemetry. Older records remain readable.
+
+Raw events are never rewritten. Human ground truth is appended separately to `labels.jsonl` and
+linked to its source event by ID; if an event is labeled again, the latest label wins.
+
+Collect a controlled session from the tracked Russian baseline plan with:
+
+```bash
+cargo run --release -- --dataset-collect
+```
+
+The prompts live in `collection-prompts.json`; pass another plan path after the flag to use a
+different campaign. Enter starts capture, `s` skips a prompt, and `q` ends the session. The normal
+microphone, VAD, Whisper, and parser pipeline is reused, but voice actions are disabled. Each
+captured event receives `prompted` source metadata and an automatic label containing the expected
+transcript and intent. Natural and prompted samples therefore remain distinguishable, and session
+IDs can later keep recordings from the same run in the same train/test split.
+
+Start or resume interactive review with:
+
+```bash
+cargo run --release -- --dataset-review
+```
+
+Press Enter to label the current event, `p` to play its WAV on macOS, `s` to skip it, or `q` to
+quit. Editable prompts explicitly say that Enter keeps the current value, so only mistakes need
+typing. On exit, review reports how many labels were saved, skipped, and remain unfinished. A later
+run automatically starts with events that do not yet have a label.
 
 The audio uses the microphone's native sample rate and channel count. This preserves more source
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
@@ -162,11 +194,50 @@ Pass a different JSON Lines file after the flag when needed:
 cargo run --release -- --dataset-report /path/to/events.jsonl
 ```
 
-The report includes execution and intent counts, rejected short candidates, Whisper non-speech
-annotations, input devices, VAD end reasons, and min/median/p95/max distributions for duration,
-speech-window count, and noise floor. It also replays saved transcripts through the current parser
-and reports changed predictions without modifying the historical JSONL records. This makes parser
-improvements visible as transitions such as `unknown -> play_music`.
+When labels exist beside the event file, the report evaluates each pipeline level separately:
+
+- speech detection: real speech, false activations, early rejections, and non-speech sent to
+  Whisper;
+- Whisper: normalized word errors on real speech only;
+- parser: historical and current accuracy, errors, and intent confusion on supported commands;
+- safety: false actionable intents on labeled non-speech and unsupported speech;
+- VAD: separate count/min/median/mean/max telemetry for speech and non-speech;
+- minimum speech duration: an offline threshold sweep from 40 through 500 ms showing speech recall
+  and noise rejection.
+
+Historical predictions remain unchanged. The current parser is replayed against the transcript
+saved at capture time, and threshold candidates are recommendations only: the live VAD setting is
+never changed by the report. Schema-version 1 events use the historical 20 ms window size when
+simulating speech duration.
+
+Before comparing transcripts, the report lowercases text, removes punctuation, and collapses
+whitespace. Word Error Rate is then calculated as
+
+$$
+WER=\frac{S+D+I}{N},
+$$
+
+where $S$ is substituted words, $D$ is deleted words, $I$ is inserted words, and $N$ is the number
+of words in the manually corrected transcript. Speech recall and noise rejection for a simulated
+threshold are
+
+$$
+R_{speech}=\frac{speech\ kept}{speech\ kept+speech\ rejected},
+\qquad
+R_{noise}=\frac{noise\ rejected}{noise\ kept+noise\ rejected}.
+$$
+
+These are offline calculations over labeled detections, not a measurement of all the silence that
+never activated Jarvis.
+
+For negative samples, the false-command rate is
+
+$$
+FCR=\frac{false\ actionable\ predictions}{negative\ samples}.
+$$
+
+A negative sample is either non-speech or speech whose correct intent is `unknown`/`no_speech`.
+This guards against improving command recall by making Jarvis dangerously eager to act.
 
 For $n$ sorted observations, the report uses the nearest-rank definition of the 95th percentile:
 
