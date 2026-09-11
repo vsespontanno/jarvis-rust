@@ -1,0 +1,2 @@
+kind: Changed
+body: Controlled collection now uses a +4 dB end margin based on the noisy cafe session.

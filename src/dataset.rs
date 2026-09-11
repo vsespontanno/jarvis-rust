@@ -17,11 +17,13 @@ mod collection;
 mod export;
 mod report;
 mod review;
+mod stt_benchmark;
 
 pub use collection::{CollectionPlan, CollectionPrompt, completed_prompt_ids};
 pub use export::export;
 pub use report::print_report;
 pub use review::{relabel, review};
+pub use stt_benchmark::benchmark_stt;
 
 const SCHEMA_VERSION: u8 = 3;
 const LABEL_SCHEMA_VERSION: u8 = 1;

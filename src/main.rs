@@ -31,7 +31,7 @@ const SPEECH_END_DURATION: Duration = Duration::from_millis(600);
 const MINIMUM_SPEECH_DURATION: Duration = Duration::from_millis(140);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
 const COLLECTION_START_MARGIN_DB: f32 = 6.0;
-const COLLECTION_END_MARGIN_DB: f32 = 2.0;
+const COLLECTION_END_MARGIN_DB: f32 = 4.0;
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
@@ -39,7 +39,41 @@ const DATASET_EXPORT_FLAG: &str = "--dataset-export";
 const DATASET_REVIEW_FLAG: &str = "--dataset-review";
 const DATASET_RELABEL_FLAG: &str = "--dataset-relabel";
 const DATASET_COLLECT_FLAG: &str = "--dataset-collect";
+const DATASET_STT_BENCHMARK_FLAG: &str = "--dataset-stt-benchmark";
 const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-plans/session-01.json";
+const HELP_TEXT: &str = r#"Jarvis — local voice assistant and dataset tooling
+
+Usage:
+  jarvis [MODEL_PATH]
+  jarvis --dataset-report [EVENTS_PATH]
+  jarvis --dataset-review [DATASET_ROOT]
+  jarvis --dataset-relabel EVENT_ID [DATASET_ROOT]
+  jarvis --dataset-collect [PLAN_PATH]
+  jarvis --dataset-export [OUTPUT_DIR]
+  jarvis --dataset-stt-benchmark MODEL_PATH [CAMPAIGN]
+  jarvis --help
+
+Commands:
+  -h, --help                    Show this help and exit
+  --dataset-report              Summarize events and labeled pipeline quality
+  --dataset-review              Label previously unreviewed dataset events
+  --dataset-relabel             Append a replacement label for one event
+  --dataset-collect             Record a controlled prompted collection session
+  --dataset-export              Export deterministic session-based data splits
+  --dataset-stt-benchmark       Re-transcribe labeled audio with a selected model
+
+Defaults:
+  MODEL_PATH    models/ggml-small.bin
+  EVENTS_PATH  data/events.jsonl
+  DATASET_ROOT data
+  PLAN_PATH    collection-plans/session-01.json
+  OUTPUT_DIR   data/splits
+
+Examples:
+  jarvis models/ggml-large-v3-turbo.bin
+  jarvis --dataset-collect collection-plans/session-02.json
+  jarvis --dataset-stt-benchmark models/ggml-small.bin intent-ru-session-01
+"#;
 
 struct CapturedUtterance {
     recording: audio::Recording,
@@ -58,6 +92,13 @@ enum ProcessingMode<'a> {
 
 fn main() -> Result<()> {
     let first_argument = env::args_os().nth(1);
+    if matches!(
+        first_argument.as_deref(),
+        Some(argument) if argument == OsStr::new("--help") || argument == OsStr::new("-h")
+    ) {
+        print!("{HELP_TEXT}");
+        return Ok(());
+    }
     if first_argument.as_deref() == Some(OsStr::new(DATASET_REPORT_FLAG)) {
         let events_path = env::args_os()
             .nth(2)
@@ -88,6 +129,21 @@ fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DATASET_PATH));
         return dataset::relabel(&dataset_path, &event_id.to_string_lossy());
+    }
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_STT_BENCHMARK_FLAG)) {
+        let model_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .context("usage: --dataset-stt-benchmark <model-path> [campaign]")?;
+        let campaign = env::args_os()
+            .nth(3)
+            .map(|value| value.to_string_lossy().into_owned());
+        init_logging();
+        return dataset::benchmark_stt(
+            PathBuf::from(DATASET_PATH).as_path(),
+            &model_path,
+            campaign.as_deref(),
+        );
     }
 
     let collection_plan_path =
@@ -724,8 +780,26 @@ mod tests {
         assert_eq!(normal.start_margin_db, 12.0);
         assert_eq!(normal.end_margin_db, 6.0);
         assert_eq!(collection.start_margin_db, 6.0);
-        assert_eq!(collection.end_margin_db, 2.0);
+        assert_eq!(collection.end_margin_db, 4.0);
         assert_eq!(collection.minimum_start_level_dbfs, -35.0);
         assert_eq!(collection.minimum_end_level_dbfs, -40.0);
+    }
+
+    #[test]
+    fn help_lists_every_cli_flag_and_default() {
+        for flag in [
+            "--help",
+            DATASET_REPORT_FLAG,
+            DATASET_REVIEW_FLAG,
+            DATASET_RELABEL_FLAG,
+            DATASET_COLLECT_FLAG,
+            DATASET_EXPORT_FLAG,
+            DATASET_STT_BENCHMARK_FLAG,
+        ] {
+            assert!(HELP_TEXT.contains(flag), "help is missing {flag}");
+        }
+
+        assert!(HELP_TEXT.contains(DEFAULT_MODEL_PATH));
+        assert!(HELP_TEXT.contains(DEFAULT_COLLECTION_PLAN_PATH));
     }
 }

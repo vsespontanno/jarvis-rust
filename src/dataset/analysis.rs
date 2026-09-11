@@ -128,19 +128,19 @@ pub(super) struct ThresholdEvaluation {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct WordErrors {
-    substitutions: usize,
-    deletions: usize,
-    insertions: usize,
-    reference_words: usize,
+pub(super) struct WordErrors {
+    pub substitutions: usize,
+    pub deletions: usize,
+    pub insertions: usize,
+    pub reference_words: usize,
 }
 
 impl WordErrors {
-    fn edits(self) -> usize {
+    pub fn edits(self) -> usize {
         self.substitutions + self.deletions + self.insertions
     }
 
-    fn rate(self) -> Option<f64> {
+    pub fn rate(self) -> Option<f64> {
         (self.reference_words > 0).then(|| self.edits() as f64 / self.reference_words as f64)
     }
 }
@@ -297,7 +297,7 @@ pub(super) fn normalize_transcript(text: &str) -> String {
     normalized.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn word_errors(reference: &str, hypothesis: &str) -> WordErrors {
+pub(super) fn word_errors(reference: &str, hypothesis: &str) -> WordErrors {
     let normalized_reference = normalize_transcript(reference);
     let normalized_hypothesis = normalize_transcript(hypothesis);
     let reference = normalized_reference.split_whitespace().collect::<Vec<_>>();

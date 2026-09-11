@@ -31,6 +31,18 @@ Expected SHA-1:
 
 Models whose names end in `.en` support English only and cannot transcribe Russian.
 
+The project has also been tested with the optional multilingual `large-v3-turbo` model:
+
+```bash
+curl --fail --location \
+  --output models/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+shasum -a 1 models/ggml-large-v3-turbo.bin
+```
+
+Its expected SHA-1 is `4af2b29d7ec73d781377bfd1758ca957a807e941`. The local model files are
+excluded from Git; `small` is about 465 MB and `large-v3-turbo` is about 1.5 GB.
+
 ## Run
 
 ```bash
@@ -51,6 +63,15 @@ argument:
 cargo run --release -- /path/to/ggml-model.bin
 ```
 
+For example, run Jarvis with the tested larger model using:
+
+```bash
+cargo run --release -- models/ggml-large-v3-turbo.bin
+```
+
+Controlled collection intentionally continues to use the default `small` model so that historical
+collection transcripts remain comparable. Offline benchmarking accepts an explicit model path.
+
 Native Whisper diagnostics are hidden unless they are warnings or errors. Enable detailed logs when
 debugging with:
 
@@ -60,6 +81,22 @@ RUST_LOG=debug cargo run --release
 
 The first launch may require enabling microphone access for Terminal in **System Settings → Privacy
 & Security → Microphone**.
+
+## CLI reference
+
+Run `cargo run --release -- --help` for the built-in reference. All current invocation forms are:
+
+| Command | Purpose | Default when omitted |
+| --- | --- | --- |
+| `cargo run --release` | Start the continuous voice-assistant loop | `models/ggml-small.bin` |
+| `cargo run --release -- MODEL_PATH` | Start Jarvis with another Whisper model | — |
+| `cargo run --release -- --dataset-report [EVENTS_PATH]` | Report dataset, VAD, Whisper, and parser quality | `data/events.jsonl` |
+| `cargo run --release -- --dataset-review [DATASET_ROOT]` | Label all previously unreviewed events | `data` |
+| `cargo run --release -- --dataset-relabel EVENT_ID [DATASET_ROOT]` | Replace one label append-only | `data` |
+| `cargo run --release -- --dataset-collect [PLAN_PATH]` | Run prompted collection without executing actions | `collection-plans/session-01.json` |
+| `cargo run --release -- --dataset-export [OUTPUT_DIR]` | Export deterministic session-based splits | `data/splits` |
+| `cargo run --release -- --dataset-stt-benchmark MODEL_PATH [CAMPAIGN]` | Re-transcribe labeled WAV files and compare STT models | all eligible campaigns |
+| `cargo run --release -- --help` | Print this reference without loading the microphone or model | — |
 
 ## Changelog workflow
 
@@ -179,9 +216,57 @@ and an automatic label containing the expected transcript and intent. Natural an
 therefore remain distinguishable.
 
 Collection resumes from prompt IDs that already have both an event and a label for the same
-campaign. It also uses a noise-tolerant VAD profile (`+6 dB` start and `+2 dB` end margins) without
+campaign. It also uses a noise-tolerant VAD profile (`+6 dB` start and `+4 dB` end margins) without
 changing the normal Jarvis profile. Short detections and complete VAD timeouts retain their WAV in
 prompted mode so false negatives remain available for later VAD and Whisper experiments.
+
+Benchmark a Whisper model offline on labeled audio from one campaign:
+
+```bash
+cargo run --release -- --dataset-stt-benchmark models/ggml-small.bin intent-ru-session-01
+```
+
+The benchmark never rewrites events, labels, or audio. It creates a model-specific JSON Lines file
+under `data/benchmarks/` containing the reference, historical and new transcripts, word-error
+counts, latency, provenance, and per-sample errors. Its terminal report compares aggregate WER with
+the historical transcript, measures downstream intent accuracy, shows session/device/campaign/VAD
+breakdowns and lists the worst and Spotify-related cases. Run the same command with another model
+path for a like-for-like comparison.
+
+### Whisper benchmark at the 0.6.0 development checkpoint
+
+This is a `0.6.0-dev` measurement, not a released `0.6.0`: `Cargo.toml` and Changie still identify
+the current release as `0.5.0`. The table should be extended after the remaining independent
+collection sessions are recorded.
+
+The same 80 labeled prompted samples from `intent-ru-session-01` were transcribed on the MacBook
+microphone dataset recorded in a noisy cafe. Labels are still provisional, and the campaign
+contains background-speech insertions, so this is a practical checkpoint rather than a final model
+ranking.
+
+| Metric | `ggml-small` | `ggml-large-v3-turbo` |
+| --- | ---: | ---: |
+| Exact transcripts | 37/80 | 44/80 |
+| Aggregate WER | 29.6% | 36.0% |
+| Median sample WER | 20.0% | 0.0% |
+| Intent accuracy | 53/80 (66.2%) | 57/80 (71.2%) |
+| Supported-command accuracy | 24/48 (50.0%) | 27/48 (56.2%) |
+| False commands on negatives | 3/32 (9.4%) | 2/32 (6.2%) |
+| Spotify brand retained | 6/13 | 11/13 |
+| Spotify aggregate WER | 40.4% | 29.8% |
+| Median transcription latency | 160 ms | 598 ms |
+
+On this noisy campaign, `large-v3-turbo` preserved Spotify and downstream intent more reliably but
+was about 3.7 times slower and produced more background-speech insertions, which worsened aggregate
+WER. `small` therefore remains the default until the quiet, dormitory, outdoor, and other
+independent sessions give a representative comparison.
+
+Reproduce the comparison without recording new audio:
+
+```bash
+cargo run --release -- --dataset-stt-benchmark models/ggml-small.bin intent-ru-session-01
+cargo run --release -- --dataset-stt-benchmark models/ggml-large-v3-turbo.bin intent-ru-session-01
+```
 
 Start or resume interactive review with:
 
