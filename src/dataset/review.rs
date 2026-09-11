@@ -16,6 +16,12 @@ pub fn review(root: &Path) -> Result<()> {
     review_with(root, stdin.lock(), &mut stdout, play_audio)
 }
 
+pub fn relabel(root: &Path, event_id: &str) -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    relabel_with(root, event_id, stdin.lock(), &mut stdout, play_audio)
+}
+
 fn review_with(
     root: &Path,
     input: impl BufRead,
@@ -76,53 +82,142 @@ fn review_with(
             }
         }
 
-        let default_speech = event.transcript.is_some()
-            && event
-                .prediction
-                .as_ref()
-                .is_some_and(|prediction| prediction.intent != "no_speech");
-        let Some(actual_speech) = prompt_bool(&mut output, &mut lines, "Speech?", default_speech)?
-        else {
+        let Some(label) = prompt_label(&mut output, &mut lines, event, None)? else {
             return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
         };
-
-        let (corrected_transcript, correct_intent) = if actual_speech {
-            let transcript = event.transcript.as_deref().unwrap_or("");
-            let Some(corrected) =
-                prompt_default(&mut output, &mut lines, "Corrected transcript", transcript)?
-            else {
-                return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
-            };
-            let predicted_intent = event
-                .prediction
-                .as_ref()
-                .map_or("unknown", |prediction| prediction.intent.as_str());
-            let Some(intent) =
-                prompt_default(&mut output, &mut lines, "Correct intent", predicted_intent)?
-            else {
-                return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
-            };
-            (Some(corrected), intent)
-        } else {
-            (None, "no_speech".to_owned())
-        };
-
-        let Some(notes) = prompt(&mut output, &mut lines, "Notes? [Enter=none]: ")? else {
-            return write_review_summary(&mut output, saved, skipped, pending.len() - saved);
-        };
-        let notes = (!notes.is_empty()).then_some(notes);
-        labels.append(&DatasetLabel::new(
-            event.id.clone(),
-            actual_speech,
-            corrected_transcript,
-            correct_intent,
-            notes,
-        ))?;
+        labels.append(&label)?;
         saved += 1;
         writeln!(output, "Label saved.\n")?;
     }
 
     write_review_summary(&mut output, saved, skipped, pending.len() - saved)
+}
+
+fn relabel_with(
+    root: &Path,
+    event_id: &str,
+    input: impl BufRead,
+    mut output: impl Write,
+    mut play: impl FnMut(&Path) -> Result<()>,
+) -> Result<()> {
+    let events = read_events(&root.join("events.jsonl"))?;
+    let event = events
+        .iter()
+        .find(|event| event.id == event_id)
+        .with_context(|| format!("dataset event '{event_id}' was not found"))?;
+    let labels = LabelStore::open(root)?;
+    let latest = labels.latest()?;
+    let current = latest
+        .get(event_id)
+        .with_context(|| format!("dataset event '{event_id}' has no existing label"))?;
+
+    show_event(&mut output, 1, 1, event)?;
+    show_label(&mut output, current)?;
+    let mut lines = input.lines();
+    loop {
+        let Some(action) = prompt(
+            &mut output,
+            &mut lines,
+            "Action [Enter=edit label, p=play, q=quit]: ",
+        )?
+        else {
+            return Ok(());
+        };
+        match action.to_lowercase().as_str() {
+            "" => break,
+            "p" => match &event.audio_path {
+                Some(relative_path) => {
+                    if let Err(error) = play(&root.join(relative_path)) {
+                        writeln!(output, "Could not play audio: {error:#}")?;
+                    }
+                }
+                None => writeln!(output, "Audio was not saved for this event.")?,
+            },
+            "q" => return Ok(()),
+            _ => writeln!(output, "Use Enter, p, or q.")?,
+        }
+    }
+
+    if let Some(label) = prompt_label(&mut output, &mut lines, event, Some(current))? {
+        labels.append(&label)?;
+        writeln!(output, "Replacement label appended.")?;
+    }
+    Ok(())
+}
+
+fn prompt_label(
+    output: &mut impl Write,
+    lines: &mut impl Iterator<Item = io::Result<String>>,
+    event: &DatasetRecord,
+    current: Option<&DatasetLabel>,
+) -> Result<Option<DatasetLabel>> {
+    let predicted_speech = event.transcript.is_some()
+        && event
+            .prediction
+            .as_ref()
+            .is_some_and(|prediction| prediction.intent != "no_speech");
+    let default_speech = current.map_or(predicted_speech, |label| label.actual_speech);
+    let Some(actual_speech) = prompt_bool(output, lines, "Speech?", default_speech)? else {
+        return Ok(None);
+    };
+
+    let (corrected_transcript, correct_intent) = if actual_speech {
+        let transcript = current
+            .and_then(|label| label.corrected_transcript.as_deref())
+            .or(event.transcript.as_deref())
+            .unwrap_or("");
+        let Some(corrected) = prompt_default(output, lines, "Corrected transcript", transcript)?
+        else {
+            return Ok(None);
+        };
+        let predicted_intent = current.map_or_else(
+            || {
+                event
+                    .prediction
+                    .as_ref()
+                    .map_or("unknown", |prediction| prediction.intent.as_str())
+            },
+            |label| label.correct_intent.as_str(),
+        );
+        let Some(intent) = prompt_default(output, lines, "Correct intent", predicted_intent)?
+        else {
+            return Ok(None);
+        };
+        (Some(corrected), intent)
+    } else {
+        (None, "no_speech".to_owned())
+    };
+
+    let default_notes = current
+        .and_then(|label| label.notes.as_deref())
+        .unwrap_or("");
+    let Some(notes) = prompt_default(output, lines, "Notes", default_notes)? else {
+        return Ok(None);
+    };
+    Ok(Some(DatasetLabel::new(
+        event.id.clone(),
+        actual_speech,
+        corrected_transcript,
+        correct_intent,
+        (!notes.is_empty()).then_some(notes),
+    )))
+}
+
+fn show_label(mut output: impl Write, label: &DatasetLabel) -> Result<()> {
+    writeln!(output, "Current label:")?;
+    writeln!(output, "  Speech: {}", label.actual_speech)?;
+    writeln!(
+        output,
+        "  Transcript: {}",
+        label.corrected_transcript.as_deref().unwrap_or("<none>")
+    )?;
+    writeln!(output, "  Intent: {}", label.correct_intent)?;
+    writeln!(
+        output,
+        "  Notes: {}\n",
+        label.notes.as_deref().unwrap_or("<none>")
+    )?;
+    Ok(())
 }
 
 fn write_review_summary(
@@ -403,6 +498,50 @@ mod tests {
         assert!(!labels["noise"].actual_speech);
         assert_eq!(labels["noise"].corrected_transcript, None);
         assert_eq!(labels["noise"].correct_intent, "no_speech");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appends_a_replacement_for_an_existing_label() {
+        let root = test_directory();
+        write_events(&root, &[event("spotify", "Открою Spotify")]);
+        let labels = LabelStore::open(&root).unwrap();
+        labels
+            .append(&DatasetLabel::new(
+                "spotify".to_owned(),
+                true,
+                Some("Открою Spotify".to_owned()),
+                "unknown".to_owned(),
+                None,
+            ))
+            .unwrap();
+        let mut output = Vec::new();
+        let mut played = Vec::new();
+
+        relabel_with(
+            &root,
+            "spotify",
+            Cursor::new("p\n\n\n\nplay_music\nchecked by ear\n"),
+            &mut output,
+            |path| {
+                played.push(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let latest = labels.latest().unwrap();
+        assert_eq!(latest["spotify"].correct_intent, "play_music");
+        assert_eq!(latest["spotify"].notes.as_deref(), Some("checked by ear"));
+        assert_eq!(played, vec![root.join("utterances/spotify.wav")]);
+        assert_eq!(
+            fs::read_to_string(root.join("labels.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

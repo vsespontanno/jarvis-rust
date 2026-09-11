@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{DatasetLabel, DatasetRecord, ExecutionStatus};
 use crate::parser;
@@ -9,6 +9,7 @@ const LEGACY_LEVEL_WINDOW_MS: u64 = 20;
 pub(super) struct DatasetAnalysis {
     pub labeled: usize,
     pub sources: SourceEvaluation,
+    pub coverage: CoverageEvaluation,
     pub detection: DetectionEvaluation,
     pub safety: SafetyEvaluation,
     pub stt: SttEvaluation,
@@ -24,6 +25,18 @@ pub(super) struct DatasetAnalysis {
 pub(super) struct SourceEvaluation {
     pub natural: usize,
     pub prompted: usize,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct CoverageEvaluation {
+    pub sessions: usize,
+    pub natural_sessions: usize,
+    pub prompted_sessions: usize,
+    pub samples_without_session: usize,
+    pub devices: BTreeMap<String, usize>,
+    pub natural_intents: BTreeMap<String, usize>,
+    pub prompted_intents: BTreeMap<String, usize>,
+    pub campaigns: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +156,7 @@ pub(super) fn analyze(
 
     let detection = evaluate_detection(&samples);
     let sources = evaluate_sources(&samples);
+    let coverage = evaluate_coverage(&samples);
     let safety = evaluate_safety(&samples);
     let stt = evaluate_stt(&samples);
     let historical_parser = evaluate_parser(&samples, ParserSource::Historical);
@@ -155,6 +169,7 @@ pub(super) fn analyze(
     DatasetAnalysis {
         labeled: samples.len(),
         sources,
+        coverage,
         detection,
         safety,
         stt,
@@ -165,6 +180,48 @@ pub(super) fn analyze(
         thresholds,
         candidate_thresholds,
     }
+}
+
+fn evaluate_coverage(samples: &[(&DatasetRecord, &DatasetLabel)]) -> CoverageEvaluation {
+    let mut result = CoverageEvaluation::default();
+    let mut sessions = BTreeSet::new();
+    let mut natural_sessions = BTreeSet::new();
+    let mut prompted_sessions = BTreeSet::new();
+
+    for (event, label) in samples {
+        increment(&mut result.devices, event.input.device.trim());
+        let prompted = event.collection.is_some();
+        let intents = if prompted {
+            &mut result.prompted_intents
+        } else {
+            &mut result.natural_intents
+        };
+        increment(intents, &label.correct_intent);
+
+        if let Some(collection) = &event.collection {
+            increment(&mut result.campaigns, &collection.campaign);
+        }
+
+        if let Some(provenance) = &event.provenance {
+            sessions.insert(provenance.session_id.clone());
+            if prompted {
+                prompted_sessions.insert(provenance.session_id.clone());
+            } else {
+                natural_sessions.insert(provenance.session_id.clone());
+            }
+        } else {
+            result.samples_without_session += 1;
+        }
+    }
+
+    result.sessions = sessions.len();
+    result.natural_sessions = natural_sessions.len();
+    result.prompted_sessions = prompted_sessions.len();
+    result
+}
+
+fn increment(counts: &mut BTreeMap<String, usize>, key: &str) {
+    *counts.entry(key.to_owned()).or_default() += 1;
 }
 
 fn evaluate_sources(samples: &[(&DatasetRecord, &DatasetLabel)]) -> SourceEvaluation {
@@ -579,8 +636,30 @@ fn median_sorted(values: &[f64]) -> f64 {
 mod tests {
     use super::*;
     use crate::dataset::{
-        ExecutionResult, GroundTruth, InputMetadata, IntentPrediction, VadTelemetry,
+        CollectionMetadata, CollectionSource, ExecutionResult, GroundTruth, InputMetadata,
+        IntentPrediction, Provenance, VadConfigMetadata, VadTelemetry,
     };
+
+    fn provenance(session_id: &str) -> Provenance {
+        Provenance {
+            jarvis_version: "0.6.0".to_owned(),
+            session_id: session_id.to_owned(),
+            whisper_model: "models/test.bin".to_owned(),
+            parser_version: 2,
+            vad_config: VadConfigMetadata {
+                level_window_ms: 20,
+                calibration_ms: 1_000,
+                speech_start_ms: 60,
+                speech_end_ms: 600,
+                min_speech_duration_ms: 140,
+                pre_roll_ms: 300,
+                start_margin_db: 12.0,
+                end_margin_db: 6.0,
+                minimum_start_level_dbfs: -35.0,
+                minimum_end_level_dbfs: -40.0,
+            },
+        }
+    }
 
     fn event(
         id: &str,
@@ -716,6 +795,42 @@ mod tests {
         assert_eq!(safety.historical_false_commands, 1);
         assert_eq!(safety.current_false_commands, 1);
         assert_eq!(safety.current_false_command_rate(), Some(0.5));
+    }
+
+    #[test]
+    fn reports_coverage_by_session_source_intent_device_and_campaign() {
+        let mut natural = event("natural", Some("который час"), Some("tell_time"), 20);
+        natural.provenance = Some(provenance("natural-session"));
+        let mut prompted = event("prompted", Some("включи музыку"), Some("play_music"), 20);
+        prompted.provenance = Some(provenance("prompted-session"));
+        prompted.collection = Some(CollectionMetadata {
+            source: CollectionSource::Prompted,
+            campaign: "baseline-ru-v1".to_owned(),
+            prompt_id: "music-01".to_owned(),
+            expected_transcript: "включи музыку".to_owned(),
+            expected_intent: "play_music".to_owned(),
+        });
+        let records = [natural, prompted];
+        let labels = BTreeMap::from([
+            (
+                "natural".to_owned(),
+                label("natural", true, Some("который час"), "tell_time"),
+            ),
+            (
+                "prompted".to_owned(),
+                label("prompted", true, Some("включи музыку"), "play_music"),
+            ),
+        ]);
+
+        let coverage = analyze(&records, &labels).coverage;
+
+        assert_eq!(coverage.sessions, 2);
+        assert_eq!(coverage.natural_sessions, 1);
+        assert_eq!(coverage.prompted_sessions, 1);
+        assert_eq!(coverage.devices["Test"], 2);
+        assert_eq!(coverage.natural_intents["tell_time"], 1);
+        assert_eq!(coverage.prompted_intents["play_music"], 1);
+        assert_eq!(coverage.campaigns["baseline-ru-v1"], 1);
     }
 
     #[test]

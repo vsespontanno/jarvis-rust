@@ -178,6 +178,16 @@ quit. Editable prompts explicitly say that Enter keeps the current value, so onl
 typing. On exit, review reports how many labels were saved, skipped, and remain unfinished. A later
 run automatically starts with events that do not yet have a label.
 
+Recheck an already labeled event by ID with:
+
+```bash
+cargo run --release -- --dataset-relabel <event-id>
+```
+
+The command shows the current label, can replay the WAV with `p`, and uses the existing values as
+defaults. Saving appends a replacement line to `labels.jsonl`; it never edits the previous label or
+the original event.
+
 The audio uses the microphone's native sample rate and channel count. This preserves more source
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
 preprocessing, transcription, or action execution is recorded in `processing_error`; it does not
@@ -202,6 +212,8 @@ When labels exist beside the event file, the report evaluates each pipeline leve
 - Whisper: normalized word errors on real speech only;
 - parser: historical and current accuracy, errors, and intent confusion on supported commands;
 - safety: false actionable intents on labeled non-speech and unsupported speech;
+- coverage: sessions, devices, natural/prompted intent counts, campaigns, and legacy samples that
+  predate session provenance;
 - VAD: separate count/min/median/mean/max telemetry for speech and non-speech;
 - minimum speech duration: an offline threshold sweep from 40 through 500 ms showing speech recall
   and noise rejection.

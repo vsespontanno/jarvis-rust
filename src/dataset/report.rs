@@ -262,6 +262,39 @@ fn write_pipeline_analysis(
         analysis.sources.prompted
     )?;
 
+    writeln!(formatter, "\nDataset coverage:")?;
+    writeln!(
+        formatter,
+        "  Sessions with provenance: {}",
+        analysis.coverage.sessions
+    )?;
+    writeln!(
+        formatter,
+        "  Natural / prompted sessions: {} / {}",
+        analysis.coverage.natural_sessions, analysis.coverage.prompted_sessions
+    )?;
+    writeln!(
+        formatter,
+        "  Legacy samples without session ID: {}",
+        analysis.coverage.samples_without_session
+    )?;
+    write_counts(formatter, "Labeled devices", &analysis.coverage.devices)?;
+    write_counts(
+        formatter,
+        "Natural ground-truth intents",
+        &analysis.coverage.natural_intents,
+    )?;
+    write_counts(
+        formatter,
+        "Prompted ground-truth intents",
+        &analysis.coverage.prompted_intents,
+    )?;
+    write_counts(
+        formatter,
+        "Collection campaigns",
+        &analysis.coverage.campaigns,
+    )?;
+
     writeln!(formatter, "\nFalse command safety:")?;
     writeln!(
         formatter,

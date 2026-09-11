@@ -34,6 +34,7 @@ const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
 const DATASET_REVIEW_FLAG: &str = "--dataset-review";
+const DATASET_RELABEL_FLAG: &str = "--dataset-relabel";
 const DATASET_COLLECT_FLAG: &str = "--dataset-collect";
 const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-prompts.json";
 
@@ -67,6 +68,16 @@ fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DATASET_PATH));
         return dataset::review(&dataset_path);
+    }
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_RELABEL_FLAG)) {
+        let event_id = env::args_os()
+            .nth(2)
+            .context("usage: --dataset-relabel <event-id> [dataset-root]")?;
+        let dataset_path = env::args_os()
+            .nth(3)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DATASET_PATH));
+        return dataset::relabel(&dataset_path, &event_id.to_string_lossy());
     }
 
     let collection_plan_path =

@@ -19,7 +19,7 @@ mod review;
 
 pub use collection::{CollectionPlan, CollectionPrompt};
 pub use report::print_report;
-pub use review::review;
+pub use review::{relabel, review};
 
 const SCHEMA_VERSION: u8 = 3;
 const LABEL_SCHEMA_VERSION: u8 = 1;
