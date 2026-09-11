@@ -1,0 +1,2 @@
+kind: Changed
+body: Controlled collection resumes completed campaigns, uses noise-tolerant VAD margins, and preserves prompted false-negative audio.

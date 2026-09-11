@@ -30,13 +30,16 @@ const SPEECH_START_DURATION: Duration = Duration::from_millis(60);
 const SPEECH_END_DURATION: Duration = Duration::from_millis(600);
 const MINIMUM_SPEECH_DURATION: Duration = Duration::from_millis(140);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
+const COLLECTION_START_MARGIN_DB: f32 = 6.0;
+const COLLECTION_END_MARGIN_DB: f32 = 2.0;
 const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
+const DATASET_EXPORT_FLAG: &str = "--dataset-export";
 const DATASET_REVIEW_FLAG: &str = "--dataset-review";
 const DATASET_RELABEL_FLAG: &str = "--dataset-relabel";
 const DATASET_COLLECT_FLAG: &str = "--dataset-collect";
-const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-prompts.json";
+const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-plans/session-01.json";
 
 struct CapturedUtterance {
     recording: audio::Recording,
@@ -61,6 +64,13 @@ fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(DATASET_PATH).join("events.jsonl"));
         return dataset::print_report(&events_path);
+    }
+    if first_argument.as_deref() == Some(OsStr::new(DATASET_EXPORT_FLAG)) {
+        let output_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DATASET_PATH).join("splits"));
+        return dataset::export(PathBuf::from(DATASET_PATH).as_path(), &output_path);
     }
     if first_argument.as_deref() == Some(OsStr::new(DATASET_REVIEW_FLAG)) {
         let dataset_path = env::args_os()
@@ -107,7 +117,11 @@ fn main() -> Result<()> {
     let transcriber = stt::WhisperTranscriber::load(&model_path)
         .context("failed to load the speech recognition model")?;
     println!("Whisper model is ready.");
-    let vad_config = vad_config();
+    let vad_config = if collection_plan.is_some() {
+        collection_vad_config()
+    } else {
+        vad_config()
+    };
     let provenance = dataset::Provenance {
         jarvis_version: env!("CARGO_PKG_VERSION").to_owned(),
         session_id: dataset::Provenance::new_session_id(),
@@ -192,7 +206,8 @@ fn process_command(
     running: &AtomicBool,
     mode: ProcessingMode<'_>,
 ) -> Result<bool> {
-    let Some(captured) = record_utterance(audio_input, detector, timer_events, running)
+    let prompted = matches!(mode, ProcessingMode::Prompted { .. });
+    let Some(captured) = record_utterance(audio_input, detector, timer_events, running, prompted)
         .context("failed to capture a speech utterance")?
     else {
         return Ok(false);
@@ -221,11 +236,25 @@ fn process_command(
             .and_then(|vad| vad.speech_windows)
             .unwrap_or(0) as u128
             * LEVEL_WINDOW.as_millis();
-        println!(
-            "Discarded short audio candidate ({speech_duration_ms} ms of speech; minimum is {} ms).",
-            MINIMUM_SPEECH_DURATION.as_millis(),
-        );
-        record.audio_path = None;
+        if prompted {
+            println!(
+                "Short prompted audio candidate ({speech_duration_ms} ms of detected speech; minimum is {} ms).",
+                MINIMUM_SPEECH_DURATION.as_millis(),
+            );
+            dataset
+                .save_audio(&sample, &captured.recording)
+                .context("failed to save prompted false-negative audio")?;
+            println!(
+                "Saved prompted false-negative audio to {}.",
+                sample.audio_path
+            );
+        } else {
+            println!(
+                "Discarded short audio candidate ({speech_duration_ms} ms of speech; minimum is {} ms).",
+                MINIMUM_SPEECH_DURATION.as_millis(),
+            );
+            record.audio_path = None;
+        }
         record.execution_result = dataset::ExecutionResult {
             status: dataset::ExecutionStatus::Rejected,
             response: None,
@@ -370,16 +399,36 @@ fn run_collection(
     timer_events: &Receiver<actions::TimerElapsed>,
     running: &AtomicBool,
 ) -> Result<()> {
+    let completed_for_campaign =
+        dataset::completed_prompt_ids(PathBuf::from(DATASET_PATH).as_path(), &plan.campaign)?;
+    let completed = plan
+        .prompts
+        .iter()
+        .filter(|prompt| completed_for_campaign.contains(&prompt.id))
+        .map(|prompt| prompt.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     println!(
         "Controlled dataset collection: {} ({} prompts).",
         plan.campaign,
         plan.prompts.len()
+    );
+    if !completed.is_empty() {
+        println!(
+            "Resuming campaign: {} prompt(s) already collected and labeled.",
+            completed.len()
+        );
+    }
+    println!(
+        "Collection VAD profile: start +{COLLECTION_START_MARGIN_DB:.0} dB, end +{COLLECTION_END_MARGIN_DB:.0} dB."
     );
     println!("Voice actions are disabled. Press Ctrl+C to stop.\n");
 
     let mut collected = 0;
     let mut skipped = 0;
     for (index, prompt) in plan.prompts.iter().enumerate() {
+        if completed.contains(&prompt.id) {
+            continue;
+        }
         if !running.load(Ordering::Relaxed) {
             break;
         }
@@ -399,7 +448,7 @@ fn run_collection(
                 print_collection_summary(
                     collected,
                     skipped,
-                    plan.prompts.len() - collected - skipped,
+                    plan.prompts.len() - completed.len() - collected - skipped,
                 );
                 return Ok(());
             }
@@ -444,7 +493,11 @@ fn run_collection(
         }
     }
 
-    print_collection_summary(collected, skipped, plan.prompts.len() - collected - skipped);
+    print_collection_summary(
+        collected,
+        skipped,
+        plan.prompts.len() - completed.len() - collected - skipped,
+    );
     Ok(())
 }
 
@@ -483,11 +536,20 @@ fn vad_config() -> vad::VadConfig {
     }
 }
 
+fn collection_vad_config() -> vad::VadConfig {
+    vad::VadConfig {
+        start_margin_db: COLLECTION_START_MARGIN_DB,
+        end_margin_db: COLLECTION_END_MARGIN_DB,
+        ..vad_config()
+    }
+}
+
 fn record_utterance(
     session: &audio::RecordingSession,
     detector: &mut vad::VadDetector,
     timer_events: &Receiver<actions::TimerElapsed>,
     running: &AtomicBool,
+    preserve_missed_capture: bool,
 ) -> Result<Option<CapturedUtterance>> {
     let needs_calibration = !detector.is_calibrated();
     detector.begin_utterance();
@@ -500,7 +562,7 @@ fn record_utterance(
         let noise_floor = detector
             .noise_floor_dbfs()
             .expect("calibrated VAD has a noise floor");
-        println!("Listening... noise floor: {noise_floor:.1} dBFS");
+        print_vad_thresholds(detector, noise_floor);
     }
 
     let (speech_end_frame, vad_metrics) = loop {
@@ -523,7 +585,8 @@ fn record_utterance(
 
                 match detector.observe(level) {
                     Some(vad::VadEvent::Calibrated { noise_floor_dbfs }) => {
-                        println!("\nListening... noise floor: {noise_floor_dbfs:.1} dBFS");
+                        println!();
+                        print_vad_thresholds(detector, noise_floor_dbfs);
                     }
                     Some(vad::VadEvent::SpeechStarted { at_frame }) => {
                         let pre_roll_frames =
@@ -539,9 +602,33 @@ fn record_utterance(
                         break (at_frame, metrics);
                     }
                     Some(vad::VadEvent::TimedOut) => {
-                        session.cancel_capture()?;
-                        println!("\nNo speech detected. Continuing to listen...");
-                        return Ok(None);
+                        if !preserve_missed_capture {
+                            session.cancel_capture()?;
+                            println!("\nNo speech detected. Continuing to listen...");
+                            return Ok(None);
+                        }
+                        let recording = session
+                            .finish_capture()
+                            .context("failed to preserve prompted VAD miss")?;
+                        let duration_ms = (recording.frame_count() as f64 * 1_000.0
+                            / f64::from(recording.sample_rate))
+                        .round() as u64;
+                        let (start_threshold, end_threshold) = detector
+                            .thresholds_dbfs()
+                            .context("VAD timed out before calibration")?;
+                        println!("\nNo speech detected; preserving prompted false negative.");
+                        return Ok(Some(CapturedUtterance {
+                            recording,
+                            vad: dataset::VadTelemetry {
+                                noise_floor_dbfs: detector.noise_floor_dbfs(),
+                                start_threshold_dbfs: Some(start_threshold),
+                                end_threshold_dbfs: Some(end_threshold),
+                                duration_ms: Some(duration_ms),
+                                speech_windows: Some(0),
+                                end_reason: Some("timeout".to_owned()),
+                                ..dataset::VadTelemetry::default()
+                            },
+                        }));
                     }
                     None => {}
                 }
@@ -577,6 +664,15 @@ fn record_utterance(
             end_reason: Some(vad_metrics.end_reason.as_str().to_owned()),
         },
     }))
+}
+
+fn print_vad_thresholds(detector: &vad::VadDetector, noise_floor: f32) {
+    let (start_threshold, end_threshold) = detector
+        .thresholds_dbfs()
+        .expect("calibrated VAD has thresholds");
+    println!(
+        "Listening... noise floor: {noise_floor:.1} dBFS, start: {start_threshold:.1} dBFS, end: {end_threshold:.1} dBFS"
+    );
 }
 
 fn windows(duration: Duration) -> usize {
@@ -618,5 +714,18 @@ mod tests {
     fn rejects_candidates_shorter_than_one_hundred_forty_milliseconds() {
         assert!(!has_minimum_speech(&telemetry_with_speech_windows(6)));
         assert!(has_minimum_speech(&telemetry_with_speech_windows(7)));
+    }
+
+    #[test]
+    fn noisy_collection_profile_only_relaxes_adaptive_margins() {
+        let normal = vad_config();
+        let collection = collection_vad_config();
+
+        assert_eq!(normal.start_margin_db, 12.0);
+        assert_eq!(normal.end_margin_db, 6.0);
+        assert_eq!(collection.start_margin_db, 6.0);
+        assert_eq!(collection.end_margin_db, 2.0);
+        assert_eq!(collection.minimum_start_level_dbfs, -35.0);
+        assert_eq!(collection.minimum_end_level_dbfs, -40.0);
     }
 }

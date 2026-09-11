@@ -355,6 +355,7 @@ mod tests {
         fs,
         io::Cursor,
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -363,14 +364,17 @@ mod tests {
         ExecutionResult, ExecutionStatus, GroundTruth, InputMetadata, IntentPrediction,
     };
 
+    static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn test_directory() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "jarvis-review-test-{}-{unique}",
-            std::process::id()
+            "jarvis-review-test-{}-{unique}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 

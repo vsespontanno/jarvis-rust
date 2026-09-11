@@ -14,10 +14,12 @@ use crate::audio::Recording;
 
 mod analysis;
 mod collection;
+mod export;
 mod report;
 mod review;
 
-pub use collection::{CollectionPlan, CollectionPrompt};
+pub use collection::{CollectionPlan, CollectionPrompt, completed_prompt_ids};
+pub use export::export;
 pub use report::print_report;
 pub use review::{relabel, review};
 

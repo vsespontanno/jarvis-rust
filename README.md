@@ -154,18 +154,34 @@ telemetry. Older records remain readable.
 Raw events are never rewritten. Human ground truth is appended separately to `labels.jsonl` and
 linked to its source event by ID; if an event is labeled again, the latest label wins.
 
-Collect a controlled session from the tracked Russian baseline plan with:
+Collect the first controlled session from the tracked Russian plans with:
 
 ```bash
 cargo run --release -- --dataset-collect
 ```
 
-The prompts live in `collection-prompts.json`; pass another plan path after the flag to use a
-different campaign. Enter starts capture, `s` skips a prompt, and `q` ends the session. The normal
-microphone, VAD, Whisper, and parser pipeline is reused, but voice actions are disabled. Each
-captured event receives `prompted` source metadata and an automatic label containing the expected
-transcript and intent. Natural and prompted samples therefore remain distinguishable, and session
-IDs can later keep recordings from the same run in the same train/test split.
+Five non-overlapping plans live in `collection-plans/`. Each contains 16 `tell_time`, 16
+`play_music`, 16 `set_timer`, and 32 hard-negative `unknown` prompts. Record one plan per independent
+session, ideally changing the device, day, distance, background noise, or speech tempo:
+
+```bash
+cargo run --release -- --dataset-collect collection-plans/session-02.json
+cargo run --release -- --dataset-collect collection-plans/session-03.json
+cargo run --release -- --dataset-collect collection-plans/session-04.json
+cargo run --release -- --dataset-collect collection-plans/session-05.json
+```
+
+Together the plans produce the initial target of 80 time, 80 music, 80 timer, and 160 unknown
+samples without repeating an exact normalized prompt across sessions. Enter starts capture, `s`
+skips a prompt, and `q` ends the session. The normal microphone, VAD, Whisper, and parser pipeline
+is reused, but voice actions are disabled. Each captured event receives `prompted` source metadata
+and an automatic label containing the expected transcript and intent. Natural and prompted samples
+therefore remain distinguishable.
+
+Collection resumes from prompt IDs that already have both an event and a label for the same
+campaign. It also uses a noise-tolerant VAD profile (`+6 dB` start and `+2 dB` end margins) without
+changing the normal Jarvis profile. Short detections and complete VAD timeouts retain their WAV in
+prompted mode so false negatives remain available for later VAD and Whisper experiments.
 
 Start or resume interactive review with:
 
@@ -192,6 +208,24 @@ The audio uses the microphone's native sample rate and channel count. This prese
 information for later experiments than storing only the 16 kHz Whisper input. A failure during
 preprocessing, transcription, or action execution is recorded in `processing_error`; it does not
 terminate the command loop.
+
+Export training manifests without copying audio files:
+
+```bash
+cargo run --release -- --dataset-export data/splits
+```
+
+The exporter creates `train.jsonl`, `validation.jsonl`, and `test.jsonl`. Eligible rows contain the
+event ID, session ID, raw Whisper transcript, ground-truth intent, `natural`/`prompted` source,
+dataset-relative audio path, and assigned split. Non-speech and records missing a label, transcript,
+session ID, valid intent, or audio file are skipped and reported.
+
+Sessions are sorted by a stable FNV-1a hash and assigned as complete units. With five sessions this
+gives three train, one validation, and one test session; no session can occur in multiple files.
+The same dataset produces byte-identical manifests on repeated export. The exporter also reports
+per-split class/session counts and warns about missing classes or exact normalized transcript
+duplicates across splits. Since every row retains `session_id`, the same manifests can later support
+leave-one-session-out evaluation.
 
 Print a read-only summary without loading the microphone or Whisper model:
 

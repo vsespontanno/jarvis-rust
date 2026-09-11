@@ -122,6 +122,15 @@ impl VadDetector {
         self.noise_floor_dbfs
     }
 
+    pub fn thresholds_dbfs(&self) -> Option<(f32, f32)> {
+        self.noise_floor_dbfs.map(|noise_floor| {
+            (
+                start_threshold_dbfs(self.config, noise_floor),
+                end_threshold_dbfs(self.config, noise_floor),
+            )
+        })
+    }
+
     pub fn begin_utterance(&mut self) {
         self.metrics = None;
         self.state = if self.noise_floor_dbfs.is_some() {
@@ -137,6 +146,7 @@ impl VadDetector {
     }
 
     pub fn observe(&mut self, level: AudioLevel) -> Option<VadEvent> {
+        let config = self.config;
         match &mut self.state {
             State::Calibrating { levels } => {
                 levels.push(level.dbfs);
@@ -160,8 +170,7 @@ impl VadDetector {
                 let noise_floor = self
                     .noise_floor_dbfs
                     .expect("noise floor is set after calibration");
-                let start_threshold = (noise_floor + self.config.start_margin_db)
-                    .max(self.config.minimum_start_level_dbfs);
+                let start_threshold = start_threshold_dbfs(config, noise_floor);
 
                 if level.dbfs >= start_threshold {
                     loud_levels.push(level.dbfs);
@@ -209,11 +218,10 @@ impl VadDetector {
                 peak_dbfs,
             } => {
                 *elapsed += 1;
-                let end_threshold = (self
+                let noise_floor = self
                     .noise_floor_dbfs
-                    .expect("noise floor is set after calibration")
-                    + self.config.end_margin_db)
-                    .max(self.config.minimum_end_level_dbfs);
+                    .expect("noise floor is set after calibration");
+                let end_threshold = end_threshold_dbfs(config, noise_floor);
 
                 if level.dbfs < end_threshold {
                     *quiet_windows += 1;
@@ -241,8 +249,7 @@ impl VadDetector {
                         .expect("noise floor is set after calibration");
                     let metrics = VadMetrics {
                         noise_floor_dbfs,
-                        start_threshold_dbfs: (noise_floor_dbfs + self.config.start_margin_db)
-                            .max(self.config.minimum_start_level_dbfs),
+                        start_threshold_dbfs: start_threshold_dbfs(config, noise_floor_dbfs),
                         end_threshold_dbfs: end_threshold,
                         peak_dbfs: *peak_dbfs,
                         mean_speech_dbfs,
@@ -266,6 +273,14 @@ impl VadDetector {
             State::Finished => None,
         }
     }
+}
+
+fn start_threshold_dbfs(config: VadConfig, noise_floor: f32) -> f32 {
+    (noise_floor + config.start_margin_db).max(config.minimum_start_level_dbfs)
+}
+
+fn end_threshold_dbfs(config: VadConfig, noise_floor: f32) -> f32 {
+    (noise_floor + config.end_margin_db).max(config.minimum_end_level_dbfs)
 }
 
 fn median(values: &mut [f32]) -> f32 {
@@ -338,6 +353,13 @@ mod tests {
             detector.observe(level(-29.0, 5)),
             Some(VadEvent::SpeechStarted { at_frame: 5 })
         );
+    }
+
+    #[test]
+    fn exposes_current_adaptive_thresholds() {
+        let detector = calibrated_detector();
+
+        assert_eq!(detector.thresholds_dbfs(), Some((-38.0, -44.0)));
     }
 
     #[test]
