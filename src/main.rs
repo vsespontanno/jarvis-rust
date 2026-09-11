@@ -2,6 +2,7 @@ mod actions;
 mod audio;
 mod command;
 mod dataset;
+mod intent_ml;
 mod parser;
 mod preprocessing;
 mod stt;
@@ -32,7 +33,7 @@ const MINIMUM_SPEECH_DURATION: Duration = Duration::from_millis(140);
 const PRE_ROLL_DURATION: Duration = Duration::from_millis(300);
 const COLLECTION_START_MARGIN_DB: f32 = 6.0;
 const COLLECTION_END_MARGIN_DB: f32 = 4.0;
-const DEFAULT_MODEL_PATH: &str = "models/ggml-small.bin";
+const DEFAULT_MODEL_PATH: &str = "models/ggml-large-v3-turbo.bin";
 const DATASET_PATH: &str = "data";
 const DATASET_REPORT_FLAG: &str = "--dataset-report";
 const DATASET_EXPORT_FLAG: &str = "--dataset-export";
@@ -40,7 +41,11 @@ const DATASET_REVIEW_FLAG: &str = "--dataset-review";
 const DATASET_RELABEL_FLAG: &str = "--dataset-relabel";
 const DATASET_COLLECT_FLAG: &str = "--dataset-collect";
 const DATASET_STT_BENCHMARK_FLAG: &str = "--dataset-stt-benchmark";
+const INTENT_TRAIN_FLAG: &str = "--intent-train";
+const INTENT_EVALUATE_FLAG: &str = "--intent-evaluate";
 const DEFAULT_COLLECTION_PLAN_PATH: &str = "collection-plans/session-01.json";
+const DEFAULT_SPLITS_PATH: &str = "data/splits";
+const DEFAULT_INTENT_MODEL_PATH: &str = "data/models/intent-v1.json";
 const HELP_TEXT: &str = r#"Jarvis — local voice assistant and dataset tooling
 
 Usage:
@@ -51,6 +56,8 @@ Usage:
   jarvis --dataset-collect [PLAN_PATH]
   jarvis --dataset-export [OUTPUT_DIR]
   jarvis --dataset-stt-benchmark MODEL_PATH [CAMPAIGN]
+  jarvis --intent-train [SPLITS_DIR] [MODEL_PATH]
+  jarvis --intent-evaluate [validation|test] [SPLITS_DIR] [MODEL_PATH]
   jarvis --help
 
 Commands:
@@ -61,18 +68,24 @@ Commands:
   --dataset-collect             Record a controlled prompted collection session
   --dataset-export              Export deterministic session-based data splits
   --dataset-stt-benchmark       Re-transcribe labeled audio with a selected model
+  --intent-train                Train the offline character TF-IDF intent model
+  --intent-evaluate             Compare rules, ML, and hybrid on one held-out split
 
 Defaults:
-  MODEL_PATH    models/ggml-small.bin
+  MODEL_PATH    models/ggml-large-v3-turbo.bin
   EVENTS_PATH  data/events.jsonl
   DATASET_ROOT data
   PLAN_PATH    collection-plans/session-01.json
   OUTPUT_DIR   data/splits
+  SPLITS_DIR   data/splits
+  INTENT_MODEL_PATH data/models/intent-v1.json
 
 Examples:
-  jarvis models/ggml-large-v3-turbo.bin
+  jarvis models/ggml-small.bin
   jarvis --dataset-collect collection-plans/session-02.json
-  jarvis --dataset-stt-benchmark models/ggml-small.bin intent-ru-session-01
+  jarvis --dataset-stt-benchmark models/ggml-large-v3-turbo.bin intent-ru-session-01
+  jarvis --intent-train
+  jarvis --intent-evaluate validation
 "#;
 
 struct CapturedUtterance {
@@ -143,6 +156,36 @@ fn main() -> Result<()> {
             PathBuf::from(DATASET_PATH).as_path(),
             &model_path,
             campaign.as_deref(),
+        );
+    }
+    if first_argument.as_deref() == Some(OsStr::new(INTENT_TRAIN_FLAG)) {
+        let splits_path = env::args_os()
+            .nth(2)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SPLITS_PATH));
+        let model_path = env::args_os()
+            .nth(3)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_INTENT_MODEL_PATH));
+        return intent_ml::train(&splits_path, &model_path);
+    }
+    if first_argument.as_deref() == Some(OsStr::new(INTENT_EVALUATE_FLAG)) {
+        let split = env::args_os()
+            .nth(2)
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "validation".to_owned());
+        let splits_path = env::args_os()
+            .nth(3)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SPLITS_PATH));
+        let model_path = env::args_os()
+            .nth(4)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_INTENT_MODEL_PATH));
+        return intent_ml::evaluate(
+            &splits_path,
+            &model_path,
+            intent_ml::EvaluationSplit::parse(&split)?,
         );
     }
 
@@ -795,11 +838,15 @@ mod tests {
             DATASET_COLLECT_FLAG,
             DATASET_EXPORT_FLAG,
             DATASET_STT_BENCHMARK_FLAG,
+            INTENT_TRAIN_FLAG,
+            INTENT_EVALUATE_FLAG,
         ] {
             assert!(HELP_TEXT.contains(flag), "help is missing {flag}");
         }
 
         assert!(HELP_TEXT.contains(DEFAULT_MODEL_PATH));
         assert!(HELP_TEXT.contains(DEFAULT_COLLECTION_PLAN_PATH));
+        assert!(HELP_TEXT.contains(DEFAULT_SPLITS_PATH));
+        assert!(HELP_TEXT.contains(DEFAULT_INTENT_MODEL_PATH));
     }
 }

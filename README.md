@@ -13,34 +13,34 @@ On Apple Silicon macOS, install CMake to build the bundled `whisper.cpp` library
 brew install cmake
 ```
 
-Download the multilingual Whisper `small` model:
+Download the default multilingual Whisper `large-v3-turbo` model:
 
 ```bash
 mkdir -p models
-curl --fail --location \
-  --output models/ggml-small.bin \
-  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
-shasum -a 1 models/ggml-small.bin
-```
-
-Expected SHA-1:
-
-```text
-55356645c2b361a969dfd0ef2c5a50d530afd8d5
-```
-
-Models whose names end in `.en` support English only and cannot transcribe Russian.
-
-The project has also been tested with the optional multilingual `large-v3-turbo` model:
-
-```bash
 curl --fail --location \
   --output models/ggml-large-v3-turbo.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
 shasum -a 1 models/ggml-large-v3-turbo.bin
 ```
 
-Its expected SHA-1 is `4af2b29d7ec73d781377bfd1758ca957a807e941`. The local model files are
+Expected SHA-1:
+
+```text
+4af2b29d7ec73d781377bfd1758ca957a807e941
+```
+
+Models whose names end in `.en` support English only and cannot transcribe Russian.
+
+The smaller multilingual `small` model remains available as a faster alternative:
+
+```bash
+curl --fail --location \
+  --output models/ggml-small.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+shasum -a 1 models/ggml-small.bin
+```
+
+Its expected SHA-1 is `55356645c2b361a969dfd0ef2c5a50d530afd8d5`. The local model files are
 excluded from Git; `small` is about 465 MB and `large-v3-turbo` is about 1.5 GB.
 
 ## Run
@@ -56,21 +56,22 @@ one-second calibration only after startup; later utterances reuse the adaptive n
 Audio arriving while Whisper or an action is running is intentionally discarded instead of being
 queued as a delayed command.
 
-The default model path is `models/ggml-small.bin`. A different model can be supplied as the first
-argument:
+The default model path is `models/ggml-large-v3-turbo.bin`. A different model can be supplied as
+the first argument:
 
 ```bash
 cargo run --release -- /path/to/ggml-model.bin
 ```
 
-For example, run Jarvis with the tested larger model using:
+For example, switch back to the faster `small` model using:
 
 ```bash
-cargo run --release -- models/ggml-large-v3-turbo.bin
+cargo run --release -- models/ggml-small.bin
 ```
 
-Controlled collection intentionally continues to use the default `small` model so that historical
-collection transcripts remain comparable. Offline benchmarking accepts an explicit model path.
+Controlled collection uses the same default model. Historical events retain their Whisper model in
+provenance, so sessions collected with `small` remain distinguishable. Offline benchmarking accepts
+an explicit model path.
 
 Native Whisper diagnostics are hidden unless they are warnings or errors. Enable detailed logs when
 debugging with:
@@ -88,7 +89,7 @@ Run `cargo run --release -- --help` for the built-in reference. All current invo
 
 | Command | Purpose | Default when omitted |
 | --- | --- | --- |
-| `cargo run --release` | Start the continuous voice-assistant loop | `models/ggml-small.bin` |
+| `cargo run --release` | Start the continuous voice-assistant loop | `models/ggml-large-v3-turbo.bin` |
 | `cargo run --release -- MODEL_PATH` | Start Jarvis with another Whisper model | — |
 | `cargo run --release -- --dataset-report [EVENTS_PATH]` | Report dataset, VAD, Whisper, and parser quality | `data/events.jsonl` |
 | `cargo run --release -- --dataset-review [DATASET_ROOT]` | Label all previously unreviewed events | `data` |
@@ -96,6 +97,8 @@ Run `cargo run --release -- --help` for the built-in reference. All current invo
 | `cargo run --release -- --dataset-collect [PLAN_PATH]` | Run prompted collection without executing actions | `collection-plans/session-01.json` |
 | `cargo run --release -- --dataset-export [OUTPUT_DIR]` | Export deterministic session-based splits | `data/splits` |
 | `cargo run --release -- --dataset-stt-benchmark MODEL_PATH [CAMPAIGN]` | Re-transcribe labeled WAV files and compare STT models | all eligible campaigns |
+| `cargo run --release -- --intent-train [SPLITS_DIR] [MODEL_PATH]` | Train the offline TF-IDF logistic-regression intent model | `data/splits`, `data/models/intent-v1.json` |
+| `cargo run --release -- --intent-evaluate [validation\|test] [SPLITS_DIR] [MODEL_PATH]` | Compare rules, ML, and the safe hybrid | `validation`, `data/splits`, `data/models/intent-v1.json` |
 | `cargo run --release -- --help` | Print this reference without loading the microphone or model | — |
 
 ## Changelog workflow
@@ -258,8 +261,9 @@ ranking.
 
 On this noisy campaign, `large-v3-turbo` preserved Spotify and downstream intent more reliably but
 was about 3.7 times slower and produced more background-speech insertions, which worsened aggregate
-WER. `small` therefore remains the default until the quiet, dormitory, outdoor, and other
-independent sessions give a representative comparison.
+WER. It is now the default because command intent and Spotify recognition are more important for
+the current interactive checkpoint. Future independent sessions will show whether that choice
+should remain permanent.
 
 Reproduce the comparison without recording new audio:
 
@@ -311,6 +315,172 @@ The same dataset produces byte-identical manifests on repeated export. The expor
 per-split class/session counts and warns about missing classes or exact normalized transcript
 duplicates across splits. Since every row retains `session_id`, the same manifests can later support
 leave-one-session-out evaluation.
+
+## Offline intent ML experiment
+
+The first custom intent model is deliberately implemented without an ML framework. It is not
+connected to the live Jarvis runtime. Train it from `train.jsonl` with:
+
+```bash
+cargo run --release -- --intent-train
+```
+
+The resulting `data/models/intent-v1.json` stores the normalization and n-gram configuration,
+train-only vocabulary, IDF values, labels, weights, biases, optimization settings, loss values,
+class counts, and training session IDs. This makes every learned value inspectable and allows an
+evaluation run to reject session leakage.
+
+Evaluate only on a held-out session split:
+
+```bash
+cargo run --release -- --intent-evaluate validation
+cargo run --release -- --intent-evaluate test
+```
+
+The report compares the existing rule parser, the ML classifier, and an agreement-gated hybrid. If
+rules find a supported command, ML must agree before it is accepted; disagreement safely becomes
+`unknown`. When rules return `unknown`, a sufficiently confident ML prediction may recover the
+command. The three strategies share accuracy, supported-command accuracy, false-command rate,
+per-class precision/recall/F1, and confusion-matrix calculations. An empty split or a session
+shared with training is an error rather than a publishable metric.
+
+### Character n-grams and TF-IDF
+
+Input is lowercased, punctuation becomes spaces, and repeated whitespace is collapsed. Boundary
+markers are added before extracting every Unicode character n-gram of length 2 through 5. If
+$c_{j,d}$ is the count of n-gram $j$ in document $d$, its term frequency is
+
+$$
+TF_{j,d}=\frac{c_{j,d}}{\sum_k c_{k,d}}.
+$$
+
+The vocabulary and document frequencies are fitted on `train.jsonl` only. With $N$ training
+documents and $DF_j$ documents containing feature $j$, smoothed inverse document frequency is
+
+$$
+IDF_j=\ln\left(\frac{N+1}{DF_j+1}\right)+1.
+$$
+
+The unnormalized feature value and its L2-normalized value are
+
+$$
+v_{j,d}=TF_{j,d}\,IDF_j,
+\qquad
+x_{j,d}=\frac{v_{j,d}}{\sqrt{\sum_k v_{k,d}^2}}.
+$$
+
+Character features are useful here because Whisper errors often preserve fragments of words such
+as `spotify`, `спотифай`, or inflected Russian commands even when complete word matching fails.
+
+### Multinomial logistic regression
+
+For intent class $c$, the model calculates a linear score from the sparse TF-IDF vector:
+
+$$
+z_c=\mathbf{w}_c^T\mathbf{x}+b_c.
+$$
+
+Scores become class probabilities through numerically stable softmax. Subtracting the largest
+score does not change the probabilities but prevents exponent overflow:
+
+$$
+p_c=\frac{\exp(z_c-z_{max})}{\sum_k\exp(z_k-z_{max})}.
+$$
+
+Training minimizes average multiclass cross-entropy with L2 weight regularization:
+
+$$
+J=-\frac{1}{N}\sum_{i=1}^{N}\ln p_{i,y_i}
+  +\frac{\lambda}{2}\sum_c\sum_j w_{c,j}^2.
+$$
+
+For class $c$ and feature $j$, the full-batch gradients are
+
+$$
+\frac{\partial J}{\partial w_{c,j}}
+=\frac{1}{N}\sum_{i=1}^{N}
+\left(p_{i,c}-\mathbb{1}[y_i=c]\right)x_{i,j}+\lambda w_{c,j},
+$$
+
+$$
+\frac{\partial J}{\partial b_c}
+=\frac{1}{N}\sum_{i=1}^{N}
+\left(p_{i,c}-\mathbb{1}[y_i=c]\right).
+$$
+
+Our training loop applies ordinary gradient descent:
+
+$$
+w_{c,j}\leftarrow w_{c,j}-\eta\frac{\partial J}{\partial w_{c,j}},
+\qquad
+b_c\leftarrow b_c-\eta\frac{\partial J}{\partial b_c}.
+$$
+
+The initial transparent baseline uses 400 epochs, learning rate $\eta=0.5$, regularization
+$\lambda=10^{-4}$, and no random initialization or shuffling, so repeated training on identical
+input is deterministic. These are baseline values, not tuned final hyperparameters.
+
+### Safe rejection and evaluation metrics
+
+Let $p_{max}=\max_c p_c$. The ML prediction is forced to `unknown` when confidence is below the
+stored threshold $\tau=0.60$:
+
+$$
+\hat y=
+\begin{cases}
+\operatorname*{arg\,max}_c p_c, & p_{max}\ge\tau,\\
+\texttt{unknown}, & p_{max}<\tau.
+\end{cases}
+$$
+
+For each class, the evaluation report calculates
+
+$$
+Precision=\frac{TP}{TP+FP},
+\qquad
+Recall=\frac{TP}{TP+FN},
+\qquad
+F_1=\frac{2\,Precision\,Recall}{Precision+Recall}.
+$$
+
+Overall and supported-command accuracy are
+
+$$
+Accuracy=\frac{\text{correct predictions}}{\text{all samples}},
+\qquad
+SupportedAccuracy=
+\frac{\text{correct supported-command predictions}}
+{\text{all supported-command samples}}.
+$$
+
+Safety remains a separate first-class metric:
+
+$$
+FalseCommandRate=
+\frac{\text{negative samples predicted as a supported command}}
+{\text{all negative samples}}.
+$$
+
+The threshold must later be selected on validation data, with special attention to false commands.
+The test split is reserved for the final frozen comparison and must not be used to tune features,
+optimization, or $\tau$.
+
+## MVP direction
+
+The intended MVP pipeline remains:
+
+```text
+microphone → continuous listening → VAD → Whisper → custom intent classifier
+→ slot extraction → action → spoken response → listening
+```
+
+The compact target vocabulary is `tell_time`, `set_timer`, `play_music`, `pause_music`,
+`next_track`, volume control, `open_app`, and mandatory `unknown`. The current ML experiment uses
+only the four classes already present in labeled data. New actionable classes enter training only
+after their actions, slot contracts, positive examples, and hard-negative examples are defined.
+After held-out rules/ML/hybrid comparison, the remaining MVP checkpoints are wake-word gating,
+simple slot extraction, live classifier integration with confidence rejection, and local TTS. An
+LLM planner is explicitly outside the MVP.
 
 Print a read-only summary without loading the microphone or Whisper model:
 
